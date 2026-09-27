@@ -46,8 +46,25 @@ On macOS, install the prerequisites from the repository root:
 
 ```bash
 brew install chromaprint ffmpeg
-python3 -m pip install -r create_metadata/requirements.txt
+python3 -m venv .venv
+.venv/bin/python -m pip install -r create_metadata/requirements.txt
 ```
+
+Install the `cm` launcher expected by the Finder workflows:
+
+```bash
+mkdir -p "$HOME/.local/bin"
+repo_path="$PWD"
+printf '#!/bin/zsh\nexec %q %q "$@"\n' \
+  "$repo_path/.venv/bin/python" \
+  "$repo_path/create_metadata/create_metadata.py" \
+  > "$HOME/.local/bin/cm"
+chmod +x "$HOME/.local/bin/cm"
+```
+
+For direct Terminal use, add `export PATH="$HOME/.local/bin:$PATH"` to
+`~/.zshrc`, open a new Terminal window, and verify `cm --help`. Recreate the
+launcher if the repository or virtual environment is moved.
 
 Create the repository-root `.env` file and restrict its permissions:
 
@@ -72,6 +89,8 @@ CREATE_METADATA_MIN_SCORE=0.90
 CREATE_METADATA_MIN_MARGIN=0.05
 CREATE_METADATA_TIMEOUT=120
 CREATE_METADATA_NETWORK_TIMEOUT=30
+CREATE_METADATA_CACHE=true
+CREATE_METADATA_CACHE_TTL_DAYS=30
 ```
 
 All three services are optional. Discogs and AcoustID are tried only when their
@@ -96,6 +115,36 @@ values from `.env`. Use `--env-file /path/to/config.env` to select another file.
 The public AcoustID service is for non-commercial use and limits clients to
 three requests per second. The script observes that limit. Fingerprints and
 track durations are sent to AcoustID; the audio files themselves are not sent.
+
+## Performance and caching
+
+`create_metadata` keeps a local SQLite cache enabled by default. On macOS it is
+stored at `~/Library/Caches/create-metadata/cache.sqlite3`. Unchanged files
+reuse their Chromaprint fingerprints, and Discogs, AcoustID, and Shazam results
+are reused for 30 days. This makes a reviewed preview followed by `--write`
+avoid repeating the expensive recognition work. Cache keys contain file
+identity or recognition inputs, never API credentials.
+
+Discogs release details are also shared between tracks, so scanning several
+tracks from one release avoids downloading the same tracklist repeatedly. The
+matching order, confidence thresholds, and conflict checks are unchanged.
+
+Every report includes a `PERFORMANCE` panel with total and per-provider time,
+cache hits and misses, and the number of network requests. While identification
+is running, the live status shows the current per-file stage: filename/tag
+recovery, Discogs, fingerprinting, AcoustID, or Shazam. Use a fresh provider
+lookup when desired with:
+
+```bash
+python3 create_metadata/create_metadata.py --refresh-cache "/path/to/music-folder"
+```
+
+`--refresh-cache` still reuses a valid local fingerprint; it refreshes the
+network-provider responses. Use `--no-cache` to disable all persistent caching,
+or `--cache-file` and `--cache-ttl-days` to override the cache location and
+provider-response lifetime. The same settings are available as
+`CREATE_METADATA_CACHE`, `CREATE_METADATA_CACHE_FILE`, and
+`CREATE_METADATA_CACHE_TTL_DAYS`.
 
 ## Usage
 
@@ -146,8 +195,37 @@ can be split and repaired without `--force`. Files with no database match, a low
 ambiguous results are always left unchanged. Rerun `flatten_music.py --dry-run`
 after writing tags.
 
-For a short `cm` terminal command and a read-only Finder Quick Action, follow
-the [macOS integration instructions](../README.md#install-the-cm-command-on-macos).
+## Finder Quick Action installation and usage
+
+Four ready-to-install macOS workflows are version-controlled in
+[`finder_workflows/`](finder_workflows/). After installing and configuring the
+`cm` launcher, install or update all four from the repository root:
+
+```bash
+./create_metadata/finder_workflows/install.sh
+```
+
+The installer copies them into `~/Library/Services`. Enable them under **System
+Settings → Privacy & Security → Extensions → Finder** if they do not appear.
+On first use, allow the workflows to control Terminal.
+
+Control-click a folder in Finder, open **Quick Actions**, and choose:
+
+| Quick Action | Equivalent command | Behavior |
+| --- | --- | --- |
+| **Music Metadata — 1 Analyze** | `cm FOLDER` | Normal read-only analysis. Start here. |
+| **Music Metadata — 2 Write Accepted** | `cm --write FOLDER` | Displays a confirmation, then fills accepted missing fields. Existing artist/title values are preserved. |
+| **Music Metadata — Refresh Analysis** | `cm --refresh-cache FOLDER` | Gets fresh network-provider results while retaining valid local fingerprints. |
+| **Music Metadata — Force Analyze** | `cm --force FOLDER` | Read-only analysis of every audio file, including files with complete tags. |
+
+The intended flow is **Analyze → review the Terminal report → Write Accepted**.
+The cache makes the write pass reuse the expensive analysis. Refresh only when
+results appear stale, and use Force Analyze to audit already tagged files.
+
+No bundled action runs `--force --write`; replacing existing artist and title
+tags remains an explicit Terminal-only operation. Rerun the installer after
+pulling workflow updates. The workflows resolve `~/.local/bin/cm` dynamically
+and do not embed the original contributor's repository path.
 
 ## Tests
 

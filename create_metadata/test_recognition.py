@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from create_metadata.recognition import (
+    DiscogsClient,
     Match,
     ProviderError,
     ShazamClient,
@@ -13,6 +14,36 @@ from create_metadata.recognition import (
 
 
 class RecognitionTests(unittest.TestCase):
+    def test_discogs_request_cache_avoids_network_and_rate_limit(self):
+        payload = {"results": []}
+        stored = {}
+
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return None
+
+            def read(self):
+                return b'{"results": []}'
+
+        def urlopen(request, timeout):
+            return Response()
+
+        client = DiscogsClient(
+            "token",
+            30,
+            urlopen=urlopen,
+            cache_get=stored.get,
+            cache_put=stored.__setitem__,
+        )
+
+        self.assertEqual(client.request("https://api.discogs.com/test"), payload)
+        self.assertEqual(client.request("https://api.discogs.com/test"), payload)
+        self.assertEqual(client.network_requests, 1)
+        self.assertEqual(client.cache_hits, 1)
+
     def test_filename_candidate_removes_dj_codes_and_download_markers(self):
         candidate = filename_candidate(
             Path(

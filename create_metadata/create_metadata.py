@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -31,6 +32,7 @@ from rich.table import Table
 from rich.text import Text
 
 try:
+    from .cache import RecognitionCache, default_cache_path, file_cache_key
     from .recognition import (
         DiscogsClient,
         Match,
@@ -41,6 +43,7 @@ try:
         matches_agree,
     )
 except ImportError:  # Direct execution: python create_metadata/create_metadata.py
+    from cache import RecognitionCache, default_cache_path, file_cache_key  # type: ignore[no-redef]
     from recognition import (  # type: ignore[no-redef]
         DiscogsClient,
         Match,
@@ -130,7 +133,26 @@ class Configuration:
     min_margin: float
     fingerprint_timeout: float
     network_timeout: float
+    cache_enabled: bool
+    cache_file: Path
+    cache_ttl_days: float
+    refresh_cache: bool
     env_file: Path
+
+
+@dataclass(frozen=True)
+class RunMetrics:
+    total: float
+    metadata: float
+    identification: float
+    writing: float
+    fingerprint: float
+    discogs: float
+    acoustid: float
+    shazam: float
+    cache_hits: int
+    cache_misses: int
+    network_requests: int
 
 
 def parse_env_value(value: str, *, path: Path, line_number: int) -> str:
@@ -261,6 +283,20 @@ def configuration_from_args(
         network_timeout=number(
             "CREATE_METADATA_NETWORK_TIMEOUT", args.network_timeout, 30.0
         ),
+        cache_enabled=boolean("CREATE_METADATA_CACHE", args.cache, True),
+        cache_file=Path(
+            str(
+                configured(
+                    "CREATE_METADATA_CACHE_FILE",
+                    args.cache_file,
+                    default_cache_path(),
+                )
+            )
+        ).expanduser(),
+        cache_ttl_days=number(
+            "CREATE_METADATA_CACHE_TTL_DAYS", args.cache_ttl_days, 30.0
+        ),
+        refresh_cache=args.refresh_cache,
         env_file=env_file,
     )
 
@@ -375,6 +411,57 @@ def fingerprint_file(
     if duration <= 0 or not value:
         raise FingerprintError("fpcalc returned an empty fingerprint")
     return Fingerprint(duration=duration, value=value)
+
+
+class CachedFingerprinter:
+    """Reuse complete-file fingerprints while the source file is unchanged."""
+
+    def __init__(
+        self,
+        fpcalc: str,
+        timeout: float,
+        cache: RecognitionCache | None,
+    ) -> None:
+        self.fpcalc = fpcalc
+        self.timeout = timeout
+        self.cache = cache
+        self.calls = 0
+        self.cache_hits = 0
+        self.elapsed = 0.0
+
+    def __call__(self, path: Path) -> Fingerprint:
+        started = time.monotonic()
+        self.calls += 1
+        try:
+            key = file_cache_key(path)
+        except OSError as error:
+            raise FingerprintError(f"cannot stat audio file: {error}") from error
+        if self.cache is not None:
+            cached = self.cache.get("fingerprint-v1", key, permanent=True)
+            if isinstance(cached, Mapping):
+                try:
+                    fingerprint = Fingerprint(
+                        duration=int(cached["duration"]),
+                        value=str(cached["value"]),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    pass
+                else:
+                    if fingerprint.duration > 0 and fingerprint.value:
+                        self.cache_hits += 1
+                        self.elapsed += time.monotonic() - started
+                        return fingerprint
+        try:
+            fingerprint = fingerprint_file(path, self.fpcalc, timeout=self.timeout)
+            if self.cache is not None:
+                self.cache.put(
+                    "fingerprint-v1",
+                    key,
+                    {"duration": fingerprint.duration, "value": fingerprint.value},
+                )
+            return fingerprint
+        finally:
+            self.elapsed += time.monotonic() - started
 
 
 def lookup_acoustid(
@@ -614,6 +701,8 @@ def analyze_missing_file(
     min_margin: float,
     fingerprint_timeout: float,
     replace_existing: bool = False,
+    fingerprint_lookup: Callable[[Path], Fingerprint] | None = None,
+    progress: Callable[[str], None] | None = None,
 ) -> FileOutcome:
     candidate = filename_candidate(path)
     notes: list[str] = []
@@ -636,6 +725,8 @@ def analyze_missing_file(
         )
 
     if candidate is not None and discogs_lookup is not None:
+        if progress is not None:
+            progress("Discogs")
         try:
             selection = discogs_lookup(candidate)
         except ProviderError as error:
@@ -653,7 +744,15 @@ def analyze_missing_file(
 
     if acoustid_lookup is not None and fpcalc is not None:
         try:
-            fingerprint = fingerprint_file(path, fpcalc, timeout=fingerprint_timeout)
+            if progress is not None:
+                progress("fingerprinting")
+            fingerprint = (
+                fingerprint_lookup(path)
+                if fingerprint_lookup is not None
+                else fingerprint_file(path, fpcalc, timeout=fingerprint_timeout)
+            )
+            if progress is not None:
+                progress("AcoustID")
             payload = acoustid_lookup(fingerprint)
             selection = select_match(
                 payload, min_score=min_score, min_margin=min_margin
@@ -677,6 +776,8 @@ def analyze_missing_file(
                 notes.append(selection.detail)
 
     if shazam_lookup is not None:
+        if progress is not None:
+            progress("Shazam")
         try:
             selection = shazam_lookup(path)
         except ProviderError as error:
@@ -784,12 +885,29 @@ def write_missing_metadata(
 class RateLimitedLookup:
     """Small AcoustID client that enforces the public-service rate limit."""
 
-    def __init__(self, api_key: str, timeout: float) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        timeout: float,
+        cache: RecognitionCache | None = None,
+    ) -> None:
         self.api_key = api_key
         self.timeout = timeout
+        self.cache = cache
         self.last_request: float | None = None
+        self.network_requests = 0
+        self.cache_hits = 0
+        self.elapsed = 0.0
 
     def __call__(self, fingerprint: Fingerprint) -> Mapping[str, Any]:
+        started = time.monotonic()
+        key = f"{fingerprint.duration}\0{fingerprint.value}"
+        if self.cache is not None:
+            cached = self.cache.get("acoustid-v1", key)
+            if isinstance(cached, Mapping):
+                self.cache_hits += 1
+                self.elapsed += time.monotonic() - started
+                return cached
         if self.last_request is not None:
             remaining = MINIMUM_REQUEST_INTERVAL - (
                 time.monotonic() - self.last_request
@@ -797,11 +915,98 @@ class RateLimitedLookup:
             if remaining > 0:
                 time.sleep(remaining)
         try:
-            return lookup_acoustid(
+            self.network_requests += 1
+            payload = lookup_acoustid(
                 fingerprint, self.api_key, timeout=self.timeout
             )
+            if self.cache is not None:
+                self.cache.put("acoustid-v1", key, payload)
+            return payload
         finally:
             self.last_request = time.monotonic()
+            self.elapsed += self.last_request - started
+
+
+def selection_to_cache(selection: Selection) -> Mapping[str, Any]:
+    match = selection.match
+    return {
+        "status": selection.status,
+        "detail": selection.detail,
+        "match": None
+        if match is None
+        else {
+            "artist": match.artist,
+            "title": match.title,
+            "score": match.score,
+            "recording_id": match.recording_id,
+            "source": match.source,
+        },
+    }
+
+
+def selection_from_cache(value: Any) -> Selection | None:
+    if not isinstance(value, Mapping):
+        return None
+    status = value.get("status")
+    detail = value.get("detail")
+    if not isinstance(status, str) or not isinstance(detail, str):
+        return None
+    match_data = value.get("match")
+    if match_data is None:
+        return Selection(None, status, detail)
+    if not isinstance(match_data, Mapping):
+        return None
+    try:
+        match = Match(
+            artist=str(match_data["artist"]),
+            title=str(match_data["title"]),
+            score=float(match_data["score"]),
+            recording_id=(
+                str(match_data["recording_id"])
+                if match_data.get("recording_id") is not None
+                else None
+            ),
+            source=str(match_data["source"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    return Selection(match, status, detail)
+
+
+class CachedShazamLookup:
+    """Cache Shazam's final selection for an unchanged audio file."""
+
+    def __init__(
+        self,
+        lookup: Callable[[Path], Selection],
+        cache: RecognitionCache | None,
+    ) -> None:
+        self.lookup = lookup
+        self.cache = cache
+        self.calls = 0
+        self.cache_hits = 0
+        self.elapsed = 0.0
+
+    def __call__(self, path: Path) -> Selection:
+        started = time.monotonic()
+        self.calls += 1
+        try:
+            key = file_cache_key(path)
+        except OSError:
+            key = ""
+        if self.cache is not None and key:
+            selection = selection_from_cache(self.cache.get("shazam-v1", key))
+            if selection is not None:
+                self.cache_hits += 1
+                self.elapsed += time.monotonic() - started
+                return selection
+        try:
+            selection = self.lookup(path)
+            if self.cache is not None and key:
+                self.cache.put("shazam-v1", key, selection_to_cache(selection))
+            return selection
+        finally:
+            self.elapsed += time.monotonic() - started
 
 
 def display_path(path: Path, target: Path) -> str:
@@ -817,6 +1022,7 @@ def render_report(
     *,
     write: bool,
     replace_existing: bool,
+    metrics: RunMetrics | None = None,
 ) -> None:
     console.print()
     console.rule(Text("♫  CREATE METADATA", style="bold bright_cyan"))
@@ -923,6 +1129,27 @@ def render_report(
         Text(str(errors), style="bold red" if errors else "dim"),
     )
     console.print(Panel(summary, title="[bold]SUMMARY[/bold]", border_style="bright_blue"))
+    if metrics is not None:
+        timing = Table.grid(padding=(0, 1))
+        timing.add_column(style="dim")
+        timing.add_column(justify="right")
+        timing.add_row("Total", f"{metrics.total:.2f}s")
+        timing.add_row("Read metadata", f"{metrics.metadata:.2f}s")
+        timing.add_row("Identify", f"{metrics.identification:.2f}s")
+        if write:
+            timing.add_row("Write tags", f"{metrics.writing:.2f}s")
+        timing.add_row("Discogs", f"{metrics.discogs:.2f}s")
+        timing.add_row("Fingerprint", f"{metrics.fingerprint:.2f}s")
+        timing.add_row("AcoustID", f"{metrics.acoustid:.2f}s")
+        timing.add_row("Shazam", f"{metrics.shazam:.2f}s")
+        timing.add_row(
+            "Cache",
+            f"{metrics.cache_hits} hits · {metrics.cache_misses} misses",
+        )
+        timing.add_row("Network", f"{metrics.network_requests} requests")
+        console.print(
+            Panel(timing, title="[bold]PERFORMANCE[/bold]", border_style="cyan")
+        )
     if not write and changed:
         write_command = "--force --write" if replace_existing else "--write"
         action = (
@@ -1004,10 +1231,32 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         type=float,
         help="override CREATE_METADATA_NETWORK_TIMEOUT from .env",
     )
+    parser.add_argument(
+        "--cache",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="enable or disable the persistent recognition cache (default: enabled)",
+    )
+    parser.add_argument(
+        "--cache-file",
+        type=Path,
+        help="override CREATE_METADATA_CACHE_FILE from .env",
+    )
+    parser.add_argument(
+        "--cache-ttl-days",
+        type=float,
+        help="override CREATE_METADATA_CACHE_TTL_DAYS from .env",
+    )
+    parser.add_argument(
+        "--refresh-cache",
+        action="store_true",
+        help="ignore cached provider responses and replace them with fresh results",
+    )
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    run_started = time.monotonic()
     args = parse_args(argv)
     console = Console(highlight=False)
     error_console = Console(stderr=True, highlight=False)
@@ -1030,7 +1279,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if configuration.fingerprint_timeout <= 0 or configuration.network_timeout <= 0:
         error_console.print("[bold red]Error:[/bold red] timeouts must be positive")
         return 2
+    if configuration.cache_ttl_days <= 0:
+        error_console.print("[bold red]Error:[/bold red] cache TTL must be positive")
+        return 2
 
+    metadata_started = time.monotonic()
     try:
         files = scan_audio_files(target)
     except OSError as error:
@@ -1058,18 +1311,52 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 pending_indexes.append(len(outcomes))
                 outcomes.append(FileOutcome(path, existing, None, "error", "not scanned"))
+    metadata_elapsed = time.monotonic() - metadata_started
+
+    cache: RecognitionCache | None = None
+    if pending_indexes and configuration.cache_enabled:
+        try:
+            cache = RecognitionCache(
+                configuration.cache_file,
+                ttl_seconds=configuration.cache_ttl_days * 86400,
+                refresh=configuration.refresh_cache,
+            )
+        except (OSError, sqlite3.Error) as error:
+            error_console.print(
+                f"[yellow]Warning:[/yellow] recognition cache is unavailable: {error}"
+            )
+
+    discogs_client: DiscogsClient | None = None
+    acoustid_client: RateLimitedLookup | None = None
+    fingerprinter: CachedFingerprinter | None = None
+    shazam_client: CachedShazamLookup | None = None
+    identification_started = time.monotonic()
 
     if pending_indexes:
         discogs_lookup: Callable[[Match], Selection] | None = None
         if configuration.discogs_token:
-            discogs_lookup = DiscogsClient(
-                configuration.discogs_token, configuration.network_timeout
+            discogs_client = DiscogsClient(
+                configuration.discogs_token,
+                configuration.network_timeout,
+                cache_get=(
+                    (lambda key: cache.get("discogs-v1", key))
+                    if cache is not None
+                    else None
+                ),
+                cache_put=(
+                    (lambda key, value: cache.put("discogs-v1", key, value))
+                    if cache is not None
+                    else None
+                ),
             )
+            discogs_lookup = discogs_client
 
         shazam_lookup: Callable[[Path], Selection] | None = None
         if configuration.shazam_enabled:
             ffmpeg = shutil.which(configuration.ffmpeg)
             if ffmpeg is None:
+                if cache is not None:
+                    cache.close()
                 error_console.print(
                     "[bold red]Error:[/bold red] Shazam is enabled, but "
                     f"ffmpeg was not found: {configuration.ffmpeg}\n"
@@ -1077,12 +1364,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 return 2
             try:
-                shazam_lookup = ShazamClient(
+                base_shazam_lookup = ShazamClient(
                     ffmpeg,
                     configuration.fingerprint_timeout,
                     configuration.network_timeout,
                 )
+                shazam_client = CachedShazamLookup(base_shazam_lookup, cache)
+                shazam_lookup = shazam_client
             except ProviderError as error:
+                if cache is not None:
+                    cache.close()
                 error_console.print(
                     f"[bold red]Error:[/bold red] cannot enable Shazam: {error}"
                 )
@@ -1093,23 +1384,37 @@ def main(argv: Sequence[str] | None = None) -> int:
         if configuration.api_key:
             fpcalc = shutil.which(configuration.fpcalc)
             if fpcalc is None:
+                if cache is not None:
+                    cache.close()
                 error_console.print(
                     "[bold red]Error:[/bold red] AcoustID is configured, but "
                     f"fpcalc was not found: {configuration.fpcalc}\n"
                     "On macOS, install it with: [bold]brew install chromaprint[/bold]"
                 )
                 return 2
-            acoustid_lookup = RateLimitedLookup(
-                configuration.api_key, configuration.network_timeout
+            fingerprinter = CachedFingerprinter(
+                fpcalc,
+                configuration.fingerprint_timeout,
+                cache,
             )
+            acoustid_client = RateLimitedLookup(
+                configuration.api_key,
+                configuration.network_timeout,
+                cache,
+            )
+            acoustid_lookup = acoustid_client
 
         with console.status("[bold cyan]Identifying missing metadata…[/bold cyan]") as status:
             for position, index in enumerate(pending_indexes, start=1):
                 path = outcomes[index].path
-                status.update(
-                    f"[bold cyan]Identifying {position}/{len(pending_indexes)}: "
-                    f"{path.name}[/bold cyan]"
-                )
+
+                def show_stage(stage: str) -> None:
+                    status.update(
+                        f"[bold cyan]Identifying {position}/{len(pending_indexes)} "
+                        f"· {stage}: {path.name}[/bold cyan]"
+                    )
+
+                show_stage("filename and existing tags")
                 outcomes[index] = analyze_missing_file(
                     path,
                     outcomes[index].existing,
@@ -1121,8 +1426,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     min_margin=configuration.min_margin,
                     fingerprint_timeout=configuration.fingerprint_timeout,
                     replace_existing=args.replace_existing,
+                    fingerprint_lookup=fingerprinter,
+                    progress=show_stage,
                 )
+    identification_elapsed = time.monotonic() - identification_started
 
+    writing_started = time.monotonic()
     if args.write:
         with console.status("[bold cyan]Writing accepted metadata…[/bold cyan]"):
             for index, outcome in enumerate(outcomes):
@@ -1140,6 +1449,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                 verb = "replaced" if args.replace_existing else "added"
                 detail = f"{verb} " + " and ".join(changed) if changed else "tags already complete"
                 outcomes[index] = replace(outcome, status="written", detail=detail)
+    writing_elapsed = time.monotonic() - writing_started
+
+    cache_hits = cache.hits if cache is not None else 0
+    cache_misses = cache.misses if cache is not None else 0
+    if cache is not None:
+        cache.close()
+
+    metrics = RunMetrics(
+        total=time.monotonic() - run_started,
+        metadata=metadata_elapsed,
+        identification=identification_elapsed,
+        writing=writing_elapsed,
+        fingerprint=fingerprinter.elapsed if fingerprinter is not None else 0.0,
+        discogs=discogs_client.elapsed if discogs_client is not None else 0.0,
+        acoustid=acoustid_client.elapsed if acoustid_client is not None else 0.0,
+        shazam=shazam_client.elapsed if shazam_client is not None else 0.0,
+        cache_hits=cache_hits,
+        cache_misses=cache_misses,
+        network_requests=(
+            (discogs_client.network_requests if discogs_client is not None else 0)
+            + (acoustid_client.network_requests if acoustid_client is not None else 0)
+            + (
+                shazam_client.calls - shazam_client.cache_hits
+                if shazam_client is not None
+                else 0
+            )
+        ),
+    )
 
     render_report(
         console,
@@ -1147,6 +1484,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         outcomes,
         write=args.write,
         replace_existing=args.replace_existing,
+        metrics=metrics,
     )
     return 1 if any(outcome.status == "error" for outcome in outcomes) else 0
 

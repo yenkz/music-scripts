@@ -4,9 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import os
 import re
 import shutil
+import stat
 import sys
 import unicodedata
 import uuid
@@ -44,6 +46,7 @@ AUDIO_EXTENSIONS = {
 
 INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 TRAILING_VERSION = re.compile(r"^(?P<title>.+?)\s*\((?P<version>[^()]*)\)\s*$")
+STAGING_FILENAME = re.compile(r"^\.flatten-music-[0-9a-f]{32}\.tmp$")
 WINDOWS_RESERVED_NAMES = {
     "CON",
     "PRN",
@@ -250,10 +253,21 @@ def build_plan(
 
     # Files without usable metadata keep their flattened names. Renamed audio files
     # are assigned together so swaps (A -> B and B -> A) are safe and deterministic.
+    desired_by_source = {
+        source: music_filename(metadata_by_source[source], source.suffix)
+        for source in renameable
+    }
+    stationary = {
+        source
+        for source in files
+        if source not in renameable
+        or filename_key(desired_by_source[source])
+        == filename_key(flattened_by_source[source].name)
+    }
     occupied_final = {
         filename_key(flattened_by_source[source].name)
         for source in files
-        if source not in renameable
+        if source in stationary
     }
     occupied_final.update(
         filename_key(entry.name)
@@ -268,9 +282,8 @@ def build_plan(
         if metadata is None:
             final = flattened
         else:
-            desired = music_filename(metadata, source.suffix)
+            desired = desired_by_source[source]
             if filename_key(desired) == filename_key(flattened.name):
-                occupied_final.add(filename_key(flattened.name))
                 final = flattened
             else:
                 final = root / collision_safe_name(desired, occupied_final)
@@ -452,6 +465,51 @@ def render_report(
 def execute_plan(
     root: Path, plans: Sequence[FilePlan], directories: Sequence[Path]
 ) -> ExecutionResult:
+    final_keys = [filename_key(plan.final.name) for plan in plans]
+    if len(final_keys) != len(set(final_keys)):
+        raise FileExistsError(
+            errno.EEXIST,
+            "plan contains duplicate final paths; no files were changed",
+            str(root),
+        )
+
+    stale_staging_files = [
+        plan.source
+        for plan in plans
+        if plan.source.parent == root and STAGING_FILENAME.fullmatch(plan.source.name)
+    ]
+    if stale_staging_files:
+        first = stale_staging_files[0]
+        extra = (
+            f" (and {len(stale_staging_files) - 1} more)"
+            if len(stale_staging_files) > 1
+            else ""
+        )
+        raise FileExistsError(
+            errno.EEXIST,
+            f"staging file from an interrupted run requires recovery: {first}{extra}",
+            str(first),
+        )
+
+    immutable_mask = getattr(stat, "UF_IMMUTABLE", 0) | getattr(
+        stat, "SF_IMMUTABLE", 0
+    )
+    locked = [
+        plan.source
+        for plan in plans
+        if (plan.source != plan.flattened or plan.flattened != plan.final)
+        and immutable_mask
+        and plan.source.lstat().st_flags & immutable_mask
+    ]
+    if locked:
+        first = locked[0]
+        extra = f" (and {len(locked) - 1} more)" if len(locked) > 1 else ""
+        raise PermissionError(
+            errno.EPERM,
+            f"locked file cannot be moved or renamed: {first}{extra}",
+            str(first),
+        )
+
     moved = 0
     for plan in plans:
         if plan.source != plan.flattened:
@@ -459,18 +517,44 @@ def execute_plan(
             moved += 1
 
     # Stage all renames first, preventing overwrite and rename-cycle problems.
-    staged: list[tuple[Path, Path]] = []
-    for plan in plans:
-        if plan.flattened == plan.final:
-            continue
-        temporary = root / f".flatten-music-{uuid.uuid4().hex}.tmp"
-        plan.flattened.rename(temporary)
-        staged.append((temporary, plan.final))
+    staged: list[tuple[Path, Path, Path]] = []
+    try:
+        for plan in plans:
+            if plan.flattened == plan.final:
+                continue
+            temporary = root / f".flatten-music-{uuid.uuid4().hex}.tmp"
+            plan.flattened.rename(temporary)
+            staged.append((temporary, plan.flattened, plan.final))
+    except OSError:
+        # No final names have been written yet, so every original flattened path
+        # is vacant and can be restored directly.
+        for temporary, flattened, _final in reversed(staged):
+            temporary.rename(flattened)
+        raise
 
     renamed = 0
-    for temporary, final in staged:
-        temporary.rename(final)
-        renamed += 1
+    try:
+        for temporary, _flattened, final in staged:
+            if final.exists() or final.is_symlink():
+                raise FileExistsError(
+                    errno.EEXIST,
+                    "refusing to overwrite an entry created after planning",
+                    str(final),
+                )
+            temporary.rename(final)
+            renamed += 1
+    except OSError:
+        # Some final names may occupy other files' original names (rename swaps
+        # and cycles). Stage every current file again before restoring originals.
+        recovery: list[tuple[Path, Path]] = []
+        for index, (temporary, flattened, final) in enumerate(staged):
+            current = final if index < renamed else temporary
+            recovery_temporary = root / f".flatten-music-{uuid.uuid4().hex}.tmp"
+            current.rename(recovery_temporary)
+            recovery.append((recovery_temporary, flattened))
+        for recovery_temporary, flattened in recovery:
+            recovery_temporary.rename(flattened)
+        raise
 
     removed_directories: list[Path] = []
     kept_directories: list[tuple[Path, str]] = []

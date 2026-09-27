@@ -436,6 +436,32 @@ class CreateMetadataTests(unittest.TestCase):
         self.assertEqual(outcome.status, "ready")
         self.assertEqual(outcome.match.source, "Shazam")
 
+    def test_analysis_reports_each_provider_stage(self):
+        stages = []
+
+        outcome = analyze_missing_file(
+            Path("Artist - Track.mp3"),
+            ExistingMetadata(None, None),
+            fpcalc="fpcalc",
+            acoustid_lookup=lambda fingerprint: {"status": "ok", "results": []},
+            discogs_lookup=lambda candidate: Selection(
+                None, "no_match", "Discogs found no match"
+            ),
+            shazam_lookup=lambda path: Selection(
+                None, "no_match", "Shazam found no match"
+            ),
+            min_score=0.9,
+            min_margin=0.05,
+            fingerprint_timeout=120,
+            fingerprint_lookup=lambda path: Fingerprint(180, "fingerprint"),
+            progress=stages.append,
+        )
+
+        self.assertEqual(
+            stages, ["Discogs", "fingerprinting", "AcoustID", "Shazam"]
+        )
+        self.assertEqual(outcome.status, "unverified")
+
     def test_shazam_does_not_override_a_conflicting_filename(self):
         shazam_match = Match("Wrong Artist", "Wrong Track", 1.0, "123", "Shazam")
 

@@ -181,13 +181,27 @@ class DiscogsClient:
         timeout: float,
         *,
         urlopen: Callable[..., Any] = urllib.request.urlopen,
+        cache_get: Callable[[str], Any | None] | None = None,
+        cache_put: Callable[[str, Mapping[str, Any]], None] | None = None,
     ) -> None:
         self.token = token
         self.timeout = timeout
         self.urlopen = urlopen
+        self.cache_get = cache_get
+        self.cache_put = cache_put
         self.last_request: float | None = None
+        self.network_requests = 0
+        self.cache_hits = 0
+        self.elapsed = 0.0
 
     def request(self, url: str) -> Mapping[str, Any]:
+        started = time.monotonic()
+        if self.cache_get is not None:
+            cached = self.cache_get(url)
+            if isinstance(cached, Mapping):
+                self.cache_hits += 1
+                self.elapsed += time.monotonic() - started
+                return cached
         if self.last_request is not None:
             remaining = DISCOGS_REQUEST_INTERVAL - (
                 time.monotonic() - self.last_request
@@ -203,8 +217,12 @@ class DiscogsClient:
             },
         )
         try:
+            self.network_requests += 1
             with self.urlopen(request, timeout=self.timeout) as response:
-                return read_json_response(response, "Discogs")
+                payload = read_json_response(response, "Discogs")
+            if self.cache_put is not None:
+                self.cache_put(url, payload)
+            return payload
         except urllib.error.HTTPError as error:
             raise ProviderError(f"Discogs returned HTTP {error.code}") from error
         except urllib.error.URLError as error:
@@ -215,6 +233,7 @@ class DiscogsClient:
             ) from error
         finally:
             self.last_request = time.monotonic()
+            self.elapsed += self.last_request - started
 
     def __call__(self, candidate: Match) -> Selection:
         query = urllib.parse.urlencode(
