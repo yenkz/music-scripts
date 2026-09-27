@@ -47,5 +47,4 @@ pip-wheel-metadata/
 Thumbs.db
 Desktop.ini
 
-# Local project instructions
-AGENTS.md
+# Repository agent instructions are version-controlled in AGENTS.md.
