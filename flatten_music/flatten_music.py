@@ -194,6 +194,17 @@ def collision_safe_name(name: str, occupied: set[str]) -> str:
         counter += 1
 
 
+def is_collision_variant(current: str, desired: str) -> bool:
+    """Return whether current is desired with a generated `` [N]`` suffix."""
+    current_path = Path(current)
+    desired_path = Path(desired)
+    if filename_key(current_path.suffix) != filename_key(desired_path.suffix):
+        return False
+    current_stem = filename_key(current_path.stem)
+    desired_stem = re.escape(filename_key(desired_path.stem))
+    return re.fullmatch(rf"{desired_stem} \[(?:[2-9]|[1-9]\d+)\]", current_stem) is not None
+
+
 def scan_tree(root: Path) -> tuple[list[Path], list[Path]]:
     """Return all files and real subdirectories, in deterministic order."""
     files: list[Path] = []
@@ -263,6 +274,9 @@ def build_plan(
         if source not in renameable
         or filename_key(desired_by_source[source])
         == filename_key(flattened_by_source[source].name)
+        or is_collision_variant(
+            flattened_by_source[source].name, desired_by_source[source]
+        )
     }
     occupied_final = {
         filename_key(flattened_by_source[source].name)
@@ -281,12 +295,11 @@ def build_plan(
         metadata = metadata_by_source[source]
         if metadata is None:
             final = flattened
+        elif source in stationary:
+            final = flattened
         else:
             desired = desired_by_source[source]
-            if filename_key(desired) == filename_key(flattened.name):
-                final = flattened
-            else:
-                final = root / collision_safe_name(desired, occupied_final)
+            final = root / collision_safe_name(desired, occupied_final)
         plans.append(FilePlan(source, flattened, final, metadata))
     return plans
 

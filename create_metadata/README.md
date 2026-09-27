@@ -7,7 +7,11 @@ workflow designed for electronic music:
    track-number, and download-site prefixes or suffixes.
 2. Reuse a matching partial artist or title tag to complete the other field. If
    a missing artist is paired with a title containing the complete filename,
-   split that packed title into proper artist and title fields.
+   split that packed title into proper artist and title fields. A leading
+   `PREMIERE:` marker is ignored during this exact filename/tag comparison.
+   The scanner also repairs the exact legacy bug signature where an earlier
+   version wrote `<track number> Unknown Artist` as the artist even though the
+   real `Artist - Title` remained in the title and filename.
 3. Validate that candidate against Discogs release tracklists when configured.
 4. Try the AcoustID/MusicBrainz fingerprint lookup when configured.
 5. Use Shazam recognition from a short middle-of-track sample only as the last
@@ -24,6 +28,8 @@ only when there is no filename candidate or when it agrees with that candidate.
 A conflicting Shazam result never overrides a parsed filename. Without filename
 agreement, AcoustID must score at least 98%. The normal configured threshold
 applies when the filename and acoustic result agree.
+Placeholder artist values such as `Unknown Artist` are never accepted as real
+filename metadata.
 
 The script is separate from `flatten_music`: it does not move or rename files.
 It scans directories recursively. By default, it fingerprints only files that

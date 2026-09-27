@@ -87,6 +87,29 @@ class FlattenMusicTests(unittest.TestCase):
                 (root / "Target - Song [2].mp3").read_bytes(), b"incoming"
             )
 
+    def test_plan_preserves_existing_collision_suffixes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            first = root / "Artist - Track.mp3"
+            second = root / "Artist - Track [2].mp3"
+            incoming = root / "01 incoming.mp3"
+            for path in (first, second, incoming):
+                path.write_bytes(b"audio")
+
+            plans = build_plan(
+                root,
+                [incoming, first, second],
+                lambda path, easy=True: FakeAudio(
+                    {"artist": ["Artist"], "title": ["Track"]}
+                ),
+                skip_rename=False,
+            )
+
+            by_source = {plan.source: plan for plan in plans}
+            self.assertEqual(by_source[first].final, first)
+            self.assertEqual(by_source[second].final, second)
+            self.assertEqual(by_source[incoming].final.name, "Artist - Track [3].mp3")
+
     def test_plan_reads_native_id3_frames_used_by_wav_and_aiff(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

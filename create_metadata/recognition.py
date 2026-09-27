@@ -23,7 +23,12 @@ from mutagen import File as MutagenFile
 DISCOGS_SEARCH_URL = "https://api.discogs.com/database/search"
 DISCOGS_REQUEST_INTERVAL = 1.05
 LEADING_LIBRARY_CODE = re.compile(
-    r"^(?:(?:1[0-2]|[1-9])[AB]|\d{1,3})$", re.IGNORECASE
+    r"^(?:(?:1[0-2]|[1-9])[AB]|\d{1,3}|[A-Z]{1,6}\d{2,6})$", re.IGNORECASE
+)
+SEPARATOR_DASH = re.compile(r"(?:\s+[-\u2010-\u2015]\s*|\s*[-\u2010-\u2015]\s+)")
+UNKNOWN_ARTIST = re.compile(
+    r"^(?:\d{1,3}\s+)?(?:\[\s*)?unknown(?:\s+artist)?(?:\s*\])?$",
+    re.IGNORECASE,
 )
 DOWNLOAD_MARKER = re.compile(
     r"\s*[\[(](?:www\.)?[a-z0-9_-]+(?:\.[a-z0-9_-]+)+[^\])]*[\])]\s*$",
@@ -81,15 +86,18 @@ def filename_candidate(path: Path) -> Match | None:
     """Extract an Artist - Title candidate from a common DJ filename."""
     stem = unicodedata.normalize("NFC", path.stem)
     stem = DOWNLOAD_MARKER.sub("", stem).strip()
-    parts = [part.strip() for part in stem.split(" - ") if part.strip()]
-    while len(parts) > 2 and LEADING_LIBRARY_CODE.fullmatch(parts[0]):
+    parts = [part.strip() for part in SEPARATOR_DASH.split(stem) if part.strip()]
+    while len(parts) > 2 and (
+        LEADING_LIBRARY_CODE.fullmatch(parts[0])
+        or UNKNOWN_ARTIST.fullmatch(parts[0])
+    ):
         parts.pop(0)
     if len(parts) < 2:
         return None
 
     artist = parts[0]
     title = " - ".join(parts[1:])
-    if not artist or not title:
+    if not artist or not title or UNKNOWN_ARTIST.fullmatch(artist):
         return None
     return Match(artist, title, 0.70, source="Filename")
 

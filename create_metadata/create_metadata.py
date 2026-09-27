@@ -645,7 +645,38 @@ def partial_metadata_candidate(
         stem_key = metadata_key(candidate.artist, path.stem)[1]
         if existing_title_key == stem_key:
             return replace(candidate, score=1.0, source="Existing tag + filename"), True
+
+        packed_title = re.sub(
+            r"^\s*PREMIERE\s*:\s*", "", existing.title, flags=re.IGNORECASE
+        )
+        packed_candidate = filename_candidate(
+            path.with_name(f"{packed_title}{path.suffix}")
+        )
+        if packed_candidate is not None and matches_agree(candidate, packed_candidate):
+            return replace(candidate, score=1.0, source="Existing tag + filename"), True
     return None
+
+
+def placeholder_metadata_candidate(
+    path: Path, existing: ExistingMetadata
+) -> Match | None:
+    """Recover tags written by the old numbered-Unknown-Artist parser bug.
+
+    The repair is deliberately limited to the exact legacy signature: a
+    complete ``<number> Unknown Artist`` artist tag, a filename generated from
+    those tags, and a title that independently parses as ``Artist - Title``.
+    """
+    if not existing.artist or not existing.title:
+        return None
+    if not re.fullmatch(r"\d{1,3}\s+Unknown Artist", existing.artist, re.IGNORECASE):
+        return None
+    expected_stem = f"{existing.artist} - {existing.title}"
+    if metadata_key(path.stem, path.stem)[0] != metadata_key(expected_stem, expected_stem)[0]:
+        return None
+    candidate = filename_candidate(path.with_name(f"{existing.title}{path.suffix}"))
+    if candidate is None:
+        return None
+    return replace(candidate, score=1.0, source="Placeholder tag repair")
 
 
 def values_agree(existing: ExistingMetadata, match: Match) -> bool:
@@ -707,6 +738,16 @@ def analyze_missing_file(
     candidate = filename_candidate(path)
     notes: list[str] = []
     errors: list[str] = []
+
+    placeholder_repair = placeholder_metadata_candidate(path, existing)
+    if placeholder_repair is not None and not replace_existing:
+        return FileOutcome(
+            path,
+            existing,
+            placeholder_repair,
+            "ready",
+            "replace legacy numbered Unknown Artist tags",
+        )
 
     recovered = partial_metadata_candidate(path, existing)
     if recovered is not None and not replace_existing:
@@ -844,15 +885,29 @@ def write_missing_metadata(
         ),
         title=first_tag(tags, ("title", "tit2")),
     )
+    placeholder_repair = placeholder_metadata_candidate(path, existing)
+    safe_placeholder_repair = (
+        placeholder_repair is not None and matches_agree(placeholder_repair, match)
+    )
     recovery = partial_metadata_candidate(path, existing)
     safe_recovery = recovery is not None and matches_agree(recovery[0], match)
-    if not replace_existing and not values_agree(existing, match) and not safe_recovery:
+    if (
+        not replace_existing
+        and not values_agree(existing, match)
+        and not safe_recovery
+        and not safe_placeholder_repair
+    ):
         raise MetadataError("tags changed after scanning and now conflict with the match")
 
     changed: list[str] = []
-    write_artist = replace_existing or not existing.artist
+    write_artist = replace_existing or not existing.artist or safe_placeholder_repair
     repair_packed_title = bool(safe_recovery and recovery and recovery[1])
-    write_title = replace_existing or not existing.title or repair_packed_title
+    write_title = (
+        replace_existing
+        or not existing.title
+        or repair_packed_title
+        or safe_placeholder_repair
+    )
     try:
         if isinstance(tags, ID3):
             if write_artist:
@@ -1304,7 +1359,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     FileOutcome(path, ExistingMetadata(None, None), None, "error", str(error))
                 )
                 continue
-            if not needs_lookup(existing, replace_existing=args.replace_existing):
+            if (
+                not needs_lookup(existing, replace_existing=args.replace_existing)
+                and placeholder_metadata_candidate(path, existing) is None
+            ):
                 outcomes.append(
                     FileOutcome(path, existing, None, "already_tagged", "artist and title exist")
                 )

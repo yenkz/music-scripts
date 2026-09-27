@@ -22,6 +22,7 @@ from create_metadata.create_metadata import (
     needs_lookup,
     parse_args,
     partial_metadata_candidate,
+    placeholder_metadata_candidate,
     read_existing_metadata,
     render_report,
     scan_audio_files,
@@ -199,12 +200,96 @@ class CreateMetadataTests(unittest.TestCase):
         self.assertEqual(match.title, "Forever (The Teenagers remix)")
         self.assertTrue(repairs_packed_title)
 
+    def test_partial_metadata_repairs_premiere_prefixed_packed_title(self):
+        recovered = partial_metadata_candidate(
+            Path(
+                "110 Unknown Artist - Damon Jee & Darlyn Vlys - "
+                "UFO (Original Mix) [Dust & Blood].mp3"
+            ),
+            ExistingMetadata(
+                None,
+                "PREMIERE: Damon Jee & Darlyn Vlys - "
+                "UFO (Original Mix) [Dust & Blood]",
+            ),
+        )
+
+        self.assertIsNotNone(recovered)
+        match, repairs_packed_title = recovered
+        self.assertEqual(match.artist, "Damon Jee & Darlyn Vlys")
+        self.assertEqual(match.title, "UFO (Original Mix) [Dust & Blood]")
+        self.assertTrue(repairs_packed_title)
+
     def test_partial_metadata_rejects_tag_that_disagrees_with_filename(self):
         recovered = partial_metadata_candidate(
             Path("Artist - Track.mp3"), ExistingMetadata(None, "Different Track")
         )
 
         self.assertIsNone(recovered)
+
+    def test_numbered_unknown_artist_tags_are_recovered_safely(self):
+        path = Path(
+            "1 Unknown Artist - Alan Fitzpatrick & Lawrence Hart - "
+            "Closing In (Jody Wisternoff Remix).mp3"
+        )
+        existing = ExistingMetadata(
+            "1 Unknown Artist",
+            "Alan Fitzpatrick & Lawrence Hart - Closing In (Jody Wisternoff Remix)",
+        )
+
+        recovered = placeholder_metadata_candidate(path, existing)
+
+        self.assertIsNotNone(recovered)
+        self.assertEqual(recovered.artist, "Alan Fitzpatrick & Lawrence Hart")
+        self.assertEqual(recovered.title, "Closing In (Jody Wisternoff Remix)")
+
+    def test_placeholder_repair_requires_exact_generated_filename(self):
+        recovered = placeholder_metadata_candidate(
+            Path("unrelated.mp3"),
+            ExistingMetadata("1 Unknown Artist", "Artist - Track"),
+        )
+
+        self.assertIsNone(recovered)
+
+    def test_analysis_repairs_numbered_unknown_artist_without_force(self):
+        outcome = analyze_missing_file(
+            Path("4 Unknown Artist - Anderholm - Let Me In feat. Richard Walters.mp3"),
+            ExistingMetadata(
+                "4 Unknown Artist", "Anderholm - Let Me In feat. Richard Walters"
+            ),
+            fpcalc=None,
+            acoustid_lookup=None,
+            min_score=0.9,
+            min_margin=0.05,
+            fingerprint_timeout=120,
+        )
+
+        self.assertEqual(outcome.status, "ready")
+        self.assertEqual(outcome.match.artist, "Anderholm")
+        self.assertEqual(outcome.match.title, "Let Me In feat. Richard Walters")
+
+    def test_write_repairs_numbered_unknown_artist_without_force(self):
+        path = Path("4 Unknown Artist - Anderholm - Let Me In feat. Richard Walters.mp3")
+        audio = FakeAudio(
+            {
+                "artist": ["4 Unknown Artist"],
+                "title": ["Anderholm - Let Me In feat. Richard Walters"],
+            }
+        )
+
+        changed = write_missing_metadata(
+            path,
+            Match(
+                "Anderholm",
+                "Let Me In feat. Richard Walters",
+                1.0,
+                source="Placeholder tag repair",
+            ),
+            mutagen_file=lambda value, easy=True: audio,
+        )
+
+        self.assertEqual(changed, ("artist", "title"))
+        self.assertEqual(audio.tags["artist"], "Anderholm")
+        self.assertEqual(audio.tags["title"], "Let Me In feat. Richard Walters")
 
     def test_default_report_omits_complete_files_but_keeps_summary_count(self):
         with tempfile.TemporaryDirectory() as temp:

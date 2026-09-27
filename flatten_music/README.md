@@ -13,7 +13,8 @@ name becomes `Artist - Track.ext`. Files without both artist and title metadata
 keep their existing names.
 
 The script never overwrites a file. Name collisions receive a suffix such as
-`[2]`. It moves every file found below the root (not only music), removes real
+`[2]`; existing generated collision suffixes remain stable on later runs. It
+moves every file found below the root (not only music), removes real
 directories after they become empty, and leaves directory symlinks alone.
 Locked (immutable) files are reported before any files are changed. If an
 unexpected error occurs while staging renames, already staged files are restored

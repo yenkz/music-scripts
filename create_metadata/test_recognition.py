@@ -68,6 +68,53 @@ class RecognitionTests(unittest.TestCase):
         self.assertEqual(candidate.artist, "!!!")
         self.assertEqual(candidate.title, "Funk (I Got This)")
 
+    def test_filename_candidate_strips_numbered_unknown_artist_prefix(self):
+        candidate = filename_candidate(
+            Path(
+                "1 Unknown Artist - Alan Fitzpatrick & Lawrence Hart - "
+                "Closing In (Jody Wisternoff Remix).mp3"
+            )
+        )
+
+        self.assertEqual(candidate.artist, "Alan Fitzpatrick & Lawrence Hart")
+        self.assertEqual(candidate.title, "Closing In (Jody Wisternoff Remix)")
+
+    def test_filename_candidate_accepts_unicode_artist_title_dash(self):
+        candidate = filename_candidate(
+            Path(
+                "2 Unknown Artist - Kings Of Tomorrow feat. Julie McKnight – "
+                "Finally (Danny Tenaglia Return To Paradise Mix).mp3"
+            )
+        )
+
+        self.assertEqual(candidate.artist, "Kings Of Tomorrow feat. Julie McKnight")
+        self.assertEqual(
+            candidate.title,
+            "Finally (Danny Tenaglia Return To Paradise Mix)",
+        )
+
+    def test_filename_candidate_accepts_separator_with_one_missing_space(self):
+        candidate = filename_candidate(
+            Path(
+                "26 Unknown Artist - Jimmy Van M Feat Steve T & Marc Mitchell "
+                "-My Eyes Gabe Vocal Mix.mp3"
+            )
+        )
+
+        self.assertEqual(candidate.artist, "Jimmy Van M Feat Steve T & Marc Mitchell")
+        self.assertEqual(candidate.title, "My Eyes Gabe Vocal Mix")
+
+    def test_filename_candidate_removes_catalog_code(self):
+        candidate = filename_candidate(
+            Path("101 Unknown Artist - AL037 - Stephan Bodzin- Diamant.mp3")
+        )
+
+        self.assertEqual(candidate.artist, "Stephan Bodzin")
+        self.assertEqual(candidate.title, "Diamant")
+
+    def test_filename_candidate_rejects_unknown_artist(self):
+        self.assertIsNone(filename_candidate(Path("Unknown Artist - Comet.mp3")))
+
     def test_discogs_validates_track_and_removes_artist_disambiguation(self):
         candidate = Match(
             "Feathered Sun", "Saubohnen", 0.70, source="Filename"
