@@ -214,6 +214,8 @@ Four ready-to-install macOS workflows are version-controlled in
 The installer copies them into `~/Library/Services`. Enable them under **System
 Settings → Privacy & Security → Extensions → Finder** if they do not appear.
 On first use, allow the workflows to control Terminal.
+Each workflow waits for a newly opened Terminal shell to finish starting before
+it launches `cm`, including when Terminal was previously closed.
 
 Control-click a folder in Finder, open **Quick Actions**, and choose:
 

@@ -69,7 +69,12 @@
 
 		tell application "Terminal"
 			activate
-			do script shellCommand
+			set cmTab to do script ""
+			delay 1
+			repeat while (busy of cmTab)
+				delay 0.1
+			end repeat
+			do script shellCommand in cmTab
 		end tell
 	end repeat
 

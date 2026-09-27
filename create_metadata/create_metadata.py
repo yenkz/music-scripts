@@ -40,6 +40,7 @@ try:
         Selection,
         ShazamClient,
         filename_candidate,
+        filename_candidate_from_stem,
         matches_agree,
     )
 except ImportError:  # Direct execution: python create_metadata/create_metadata.py
@@ -51,6 +52,7 @@ except ImportError:  # Direct execution: python create_metadata/create_metadata.
         Selection,
         ShazamClient,
         filename_candidate,
+        filename_candidate_from_stem,
         matches_agree,
     )
 
@@ -649,9 +651,7 @@ def partial_metadata_candidate(
         packed_title = re.sub(
             r"^\s*PREMIERE\s*:\s*", "", existing.title, flags=re.IGNORECASE
         )
-        packed_candidate = filename_candidate(
-            path.with_name(f"{packed_title}{path.suffix}")
-        )
+        packed_candidate = filename_candidate_from_stem(packed_title)
         if packed_candidate is not None and matches_agree(candidate, packed_candidate):
             return replace(candidate, score=1.0, source="Existing tag + filename"), True
     return None
@@ -673,7 +673,7 @@ def placeholder_metadata_candidate(
     expected_stem = f"{existing.artist} - {existing.title}"
     if metadata_key(path.stem, path.stem)[0] != metadata_key(expected_stem, expected_stem)[0]:
         return None
-    candidate = filename_candidate(path.with_name(f"{existing.title}{path.suffix}"))
+    candidate = filename_candidate_from_stem(existing.title)
     if candidate is None:
         return None
     return replace(candidate, score=1.0, source="Placeholder tag repair")

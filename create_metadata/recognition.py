@@ -82,9 +82,9 @@ def matches_agree(left: Match, right: Match) -> bool:
     )
 
 
-def filename_candidate(path: Path) -> Match | None:
-    """Extract an Artist - Title candidate from a common DJ filename."""
-    stem = unicodedata.normalize("NFC", path.stem)
+def filename_candidate_from_stem(stem: str) -> Match | None:
+    """Extract an Artist - Title candidate from filename-like text."""
+    stem = unicodedata.normalize("NFC", stem)
     stem = DOWNLOAD_MARKER.sub("", stem).strip()
     parts = [part.strip() for part in SEPARATOR_DASH.split(stem) if part.strip()]
     while len(parts) > 2 and (
@@ -100,6 +100,11 @@ def filename_candidate(path: Path) -> Match | None:
     if not artist or not title or UNKNOWN_ARTIST.fullmatch(artist):
         return None
     return Match(artist, title, 0.70, source="Filename")
+
+
+def filename_candidate(path: Path) -> Match | None:
+    """Extract an Artist - Title candidate from a common DJ filename."""
+    return filename_candidate_from_stem(path.stem)
 
 
 def credited_artists(items: Any) -> str | None:

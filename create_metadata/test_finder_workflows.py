@@ -33,6 +33,13 @@ class FinderWorkflowTests(unittest.TestCase):
                 self.assertIn('".local/bin/cm"', script)
                 self.assertIn('set shellCommand to "/bin/zsh "', script)
                 self.assertIn(expected_argument, script)
+                self.assertIn('set cmTab to do script ""', script)
+                self.assertIn("repeat while (busy of cmTab)", script)
+                self.assertIn("do script shellCommand in cmTab", script)
+                self.assertLess(
+                    script.index('set cmTab to do script ""'),
+                    script.index("do script shellCommand in cmTab"),
+                )
                 self.assertNotIn("/Users/", script)
                 self.assertEqual(
                     info["NSServices"][0]["NSSendFileTypes"], ["public.folder"]

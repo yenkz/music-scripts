@@ -24,6 +24,10 @@ The installer copies the version-controlled workflow bundles into
 → Extensions → Finder** if they do not appear in Finder's **Quick Actions**
 menu. The first run may ask for permission to control Terminal.
 
+Each action opens a fresh Terminal tab, waits for its login shell to finish
+starting, and only then runs `cm`. This prevents a cold Terminal launch from
+showing the command without actually starting the analysis.
+
 To test installation without changing the user's services directory:
 
 ```bash

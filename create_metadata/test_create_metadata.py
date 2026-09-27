@@ -219,6 +219,29 @@ class CreateMetadataTests(unittest.TestCase):
         self.assertEqual(match.title, "UFO (Original Mix) [Dust & Blood]")
         self.assertTrue(repairs_packed_title)
 
+    def test_partial_metadata_accepts_slash_in_packed_title(self):
+        recovered = partial_metadata_candidate(
+            Path("AC DC - Thunderstruck.mp3"),
+            ExistingMetadata(None, "AC/DC - Thunderstruck"),
+        )
+
+        self.assertIsNotNone(recovered)
+        match, repairs_packed_title = recovered
+        self.assertEqual(match.artist, "AC DC")
+        self.assertEqual(match.title, "Thunderstruck")
+        self.assertTrue(repairs_packed_title)
+
+    def test_partial_metadata_does_not_crash_on_slash_prefixed_tag(self):
+        recovered = partial_metadata_candidate(
+            Path("Adam Beyer & Ida Engberg - You Know.mp3"),
+            ExistingMetadata(
+                None,
+                "1A/2A - 124 - Adam Beyer & Ida Engberg - You Know",
+            ),
+        )
+
+        self.assertIsNone(recovered)
+
     def test_partial_metadata_rejects_tag_that_disagrees_with_filename(self):
         recovered = partial_metadata_candidate(
             Path("Artist - Track.mp3"), ExistingMetadata(None, "Different Track")
@@ -246,6 +269,14 @@ class CreateMetadataTests(unittest.TestCase):
         recovered = placeholder_metadata_candidate(
             Path("unrelated.mp3"),
             ExistingMetadata("1 Unknown Artist", "Artist - Track"),
+        )
+
+        self.assertIsNone(recovered)
+
+    def test_placeholder_repair_does_not_crash_on_slash_in_packed_title(self):
+        recovered = placeholder_metadata_candidate(
+            Path("1 Unknown Artist - AC DC - Thunderstruck.mp3"),
+            ExistingMetadata("1 Unknown Artist", "AC/DC - Thunderstruck"),
         )
 
         self.assertIsNone(recovered)
