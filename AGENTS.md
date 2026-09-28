@@ -38,6 +38,19 @@ commands when it exists.
 - `README.md` — complete setup, configuration, CLI, cache, safety, and Finder
   instructions.
 
+### `find_duplicates/`
+
+- `find_duplicates.py` — exact-file discovery, SHA-256 grouping, interactive
+  keeper review, JSON manifest writing, and Rich reporting.
+- `test_find_duplicates.py` — scanning, hashing, hard-link, review, manifest,
+  and CLI behavior tests.
+- `finder_workflows/Music Duplicates — Review.workflow` — version-controlled
+  Finder Quick Action for interactive review.
+- `finder_workflows/install.sh` and `finder_workflows/README.md` — workflow
+  installation and usage.
+- `test_finder_workflow.py` — workflow portability and exact-command tests.
+- `requirements.txt` and `README.md` — dependencies and complete usage.
+
 ### Repository root
 
 - `README.md` — project index and combined macOS/Terminal/Finder setup.
@@ -166,6 +179,25 @@ These rules apply to every utility that moves, renames, deletes, or edits files:
 - `--skip-rename` works without importing Mutagen.
 - Extensions are lowercase and generated names remain portable.
 
+### `find_duplicates` invariants
+
+- Scan supported audio files only and match complete file contents by SHA-256.
+- Group by size before hashing and report files that change during hashing.
+- Do not follow directory or file symlinks.
+- Include hard-linked paths in groups without counting them as independent
+  recoverable copies.
+- Default and ordinary interactive review modes never change audio files.
+- Explicit `--review --auto-remove` previews a fixed plan and requires typed
+  confirmation before permanent removal; `--dry-run` remains strictly read-only.
+- `--menu` offers report, manual review, automatic preview, and automatic
+  removal. The macOS menu uses a native confirmation before removal, with Cancel
+  as the default; opening the menu or choosing a read-only option never mutates.
+- Automatic removal keeps only a unique unsuffixed original among matching
+  numbered copies. Skip ambiguous and hard-linked groups, revalidate the whole
+  plan before mutation, and recheck the keeper before each deletion.
+- Write a review manifest only when `--review --output` is explicitly supplied,
+  and never overwrite an existing output path or symlink.
+
 ## Metadata and provider quality invariants
 
 - Never replace an existing artist or title unless the user explicitly supplies
@@ -264,6 +296,9 @@ selected folder.
   - Write Accepted → `cm --write FOLDER`
   - Refresh Analysis → `cm --refresh-cache FOLDER`
   - Force Analyze → `cm --force FOLDER`
+- For `find_duplicates`, **Music Duplicates — Review** maps to
+  `music-dupes --menu FOLDER`. Report, review, and preview are read-only; removal
+  requires explicit menu selection and native confirmation after the plan.
 
 ### Finder installer and documentation
 
