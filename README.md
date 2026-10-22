@@ -14,14 +14,19 @@ dependencies, and tests.
 - [`find_duplicates/`](find_duplicates/) — find byte-for-byte identical audio,
   review which path to keep, save decisions as JSON, or explicitly remove
   numbered and same-name copies while preferring originals closest to the root.
+  A separate confirmed flow removes exact copies with manually chosen keepers.
+  Optional similar-name review verifies decoded audio to group copies with
+  different metadata and offers separate confirmed removal.
 - [`check_bitrate/`](check_bitrate/) — report MP3 bitrates and optionally confirm
   permanent deletion of files below 320 kbps (or a custom cutoff).
+- [`build_crates/`](build_crates/) — preview or write M3U8 playlists from recent
+  additions, label and BPM tags, and missing artist/title tags.
 
 See each subproject's README for setup and usage instructions.
 
 ## macOS installation
 
-The Finder workflows call small `fm`, `cm`, `music-dupes`, and `music-bitrate` launchers in
+The Finder workflows call small `fm`, `cm`, `music-dupes`, `music-bitrate`, and `music-crates` launchers in
 `~/.local/bin`. Run the complete setup from the repository root:
 
 ```bash
@@ -31,6 +36,7 @@ python3 -m venv .venv
 .venv/bin/python -m pip install -r create_metadata/requirements.txt
 .venv/bin/python -m pip install -r find_duplicates/requirements.txt
 .venv/bin/python -m pip install -r check_bitrate/requirements.txt
+.venv/bin/python -m pip install -r build_crates/requirements.txt
 
 mkdir -p "$HOME/.local/bin"
 repo_path="$PWD"
@@ -50,8 +56,13 @@ printf '#!/bin/zsh\nexec %q %q "$@"\n' \
   "$repo_path/.venv/bin/python" \
   "$repo_path/check_bitrate/check_bitrate.py" \
   > "$HOME/.local/bin/music-bitrate"
+printf '#!/bin/zsh\nexec %q %q "$@"\n' \
+  "$repo_path/.venv/bin/python" \
+  "$repo_path/build_crates/build_crates.py" \
+  > "$HOME/.local/bin/music-crates"
 chmod +x "$HOME/.local/bin/fm" "$HOME/.local/bin/cm" \
-  "$HOME/.local/bin/music-dupes" "$HOME/.local/bin/music-bitrate"
+  "$HOME/.local/bin/music-dupes" "$HOME/.local/bin/music-bitrate" \
+  "$HOME/.local/bin/music-crates"
 ```
 
 Add `~/.local/bin` to Terminal's command path by placing this line in
@@ -63,13 +74,14 @@ export PATH="$HOME/.local/bin:$PATH"
 
 Configure the repository-root `.env` as described in the
 [`create_metadata` requirements](create_metadata/README.md#requirements), then
-verify all four launchers:
+verify all five launchers:
 
 ```bash
 fm --help
 cm --help
 music-dupes --help
 music-bitrate --help
+music-crates --help
 ```
 
 The launchers contain the repository's absolute path. Recreate them if the
@@ -85,6 +97,7 @@ Install or update all of them from the repository root:
 ./create_metadata/finder_workflows/install.sh
 ./find_duplicates/finder_workflows/install.sh
 ./check_bitrate/finder_workflows/install.sh
+./build_crates/finder_workflows/install.sh
 ```
 
 The installers copy the bundles into `~/Library/Services`. If they do not
@@ -100,9 +113,11 @@ In Finder, Control-click a music folder and open **Quick Actions**:
 | **Music Metadata — 2 Write Accepted** | Confirms, then writes accepted matches only into missing fields. |
 | **Music Metadata — Refresh Analysis** | Refreshes cached Discogs, AcoustID, and Shazam responses. |
 | **Music Metadata — Force Analyze** | Read-only analysis of every audio file, including fully tagged files. |
-| **Music Duplicates — Review** | Opens a Terminal menu: report, manual review, automatic preview, or confirmed removal of numbered and same-name copies. |
+| **Music Duplicates — Review** | Opens a Terminal menu for exact-file duplicates or similar-name/audio verification, with read-only reports and separate confirmed removal options. |
 | **Music Bitrate — 1 Report** | Read-only MP3 bitrate report with below-320 candidates. |
 | **Music Bitrate — 2 Delete Below 320** | Native confirmation, then the exact deletion plan and a typed `DELETE` confirmation in Terminal. |
+| **Music Crates — 1 Preview** | Read-only plan for recent, label, BPM, and review playlists. |
+| **Music Crates — 2 Build** | Native confirmation, then creates new M3U8 playlists without changing audio. |
 
 The workflows open Terminal so progress, results, and errors remain visible.
 They resolve the launchers through the current user's home directory and do not
@@ -123,11 +138,16 @@ cm --force "/path/to/music-folder"    # preview every audio file
 music-dupes "/path/to/music-folder"   # report byte-for-byte duplicates
 music-dupes --menu "/path/to/music-folder"  # same option selector as the Finder action
 music-dupes --review "/path/to/music-folder"  # choose keepers without changing files
+music-dupes --review --remove-reviewed "/path/to/music-folder"  # choose exact-file keepers, then confirm removal
 music-dupes --review --auto-remove --dry-run "/path/to/music-folder"  # preview automatic choices
 music-dupes --review --auto-remove "/path/to/music-folder"  # confirm permanent removal once
+music-dupes --similar "/path/to/music-folder"  # review similar names and verify decoded audio
+music-dupes --similar --review --auto-remove --dry-run "/path/to/music-folder"  # preview audio-copy removal
 music-bitrate "/path/to/music-folder"  # report MP3 bitrates; read-only
 music-bitrate --delete --dry-run "/path/to/music-folder"  # preview below-320 deletion
 music-bitrate --delete "/path/to/music-folder"  # preview, then type DELETE to remove
+music-crates "/path/to/music-folder"  # preview playlist crates
+music-crates --write "/path/to/music-folder"  # write new M3U8 playlists
 ```
 
 Automatic duplicate removal keeps `Track.mp3` over byte-identical copies such as
@@ -137,8 +157,16 @@ once per plan. Identical filenames across folders follow the same depth rule
 even if numbered. It skips ambiguous names and hard-linked groups, displays the
 plan, and requires typing `DELETE`. The Finder menu uses a native macOS
 confirmation instead. Removal is permanent, not Trash; the menu's report,
-manual review, and preview options are read-only. See the [duplicate utility README](find_duplicates/README.md)
+manual review, and preview options are read-only. Menu option **7** allows
+confirmed removal after choosing exact-file keepers. See the [duplicate utility README](find_duplicates/README.md)
 for matching rules and safety checks.
+
+Finder menu options **5** and **6** add similar-name audio review and confirmed
+removal. They require FFmpeg and combine all copies with identical decoded audio
+into one group, even when tags or whole-file hashes differ. Only the keeper's
+metadata survives removal. Different decoded audio is never automatically
+removed as a name match. Add `--similar --review --auto-remove` in Terminal to
+show a fresh plan and require typed confirmation.
 
 Bitrate deletion selects MP3 files strictly below 320 kbps by default; use
 `--below 256` for a different cutoff. VBR/ABR use reported average bitrate.

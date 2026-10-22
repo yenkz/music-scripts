@@ -290,6 +290,32 @@ class ReviewTests(unittest.TestCase):
 
 
 class CliTests(unittest.TestCase):
+    def test_manual_exact_removal_allows_different_names_only_after_confirmation(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            keeper = root / "preferred.flac"
+            duplicate = root / "other-name.flac"
+            create_file(keeper, b"same complete file")
+            create_file(duplicate, b"same complete file")
+            with mock.patch("sys.stdin.isatty", return_value=True), \
+                    mock.patch("builtins.input", side_effect=("2", "DELETE")):
+                self.assertEqual(main(["--review", "--remove-reviewed", str(root)]), 0)
+            self.assertTrue(keeper.exists())
+            self.assertFalse(duplicate.exists())
+
+    def test_manual_exact_removal_cancel_keeps_all_groups(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, content in (("a.mp3", b"one"), ("b.mp3", b"one"),
+                                  ("c.mp3", b"two"), ("d.mp3", b"two")):
+                create_file(root / name, content)
+            with mock.patch("sys.stdin.isatty", return_value=True), \
+                    mock.patch("builtins.input", side_effect=("1", "q")), \
+                    mock.patch("find_duplicates.find_duplicates.execute_removal") as execute:
+                self.assertEqual(main(["--review", "--remove-reviewed", str(root)]), 0)
+                execute.assert_not_called()
+            self.assertEqual(len(list(root.iterdir())), 4)
+
     def test_output_requires_review(self):
         with tempfile.TemporaryDirectory() as temporary:
             with mock.patch("sys.stdin.isatty", return_value=True):

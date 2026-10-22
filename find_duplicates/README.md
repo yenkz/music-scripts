@@ -7,21 +7,29 @@ read-only, and ordinary interactive review records decisions without changing
 audio. Explicit `--review --auto-remove` can permanently remove clearly named
 duplicate copies after showing a plan and asking for confirmation.
 
+Optional `--similar` finds similar filenames and checks their decoded audio,
+ignoring tags and artwork. It can combine three, four, or more copies into one
+verified audio group even when their whole-file hashes differ. This mode is
+also read-only unless `--review --auto-remove` is explicitly supplied.
+
 The scanner groups files by size before calculating SHA-256 hashes, so a unique
 file size requires no content read. It checks each candidate before and after
 hashing and reports a file that changed, disappeared, or became unreadable while
 allowing the rest of the scan to finish. Directory and file symlinks are never
 followed.
 
-This utility finds exact whole-file duplicates. Copies with different
+The default mode finds exact whole-file duplicates. Copies with different
 tags, artwork, containers, encodings, or other bytes are not matches, even when
-they contain the same recording.
+they contain the same recording. Use `--similar` for the additional audio check.
 
 ## Requirements and installation
 
 - Python 3.10 or newer.
 - The Python packages in `requirements.txt`.
-- No API credentials, network access, Mutagen, FFmpeg, or Chromaprint.
+- No API credentials, network access, Mutagen, or Chromaprint.
+- Optional similar-name/audio verification requires `ffmpeg` and `ffprobe` on
+  PATH. Install both with `brew install ffmpeg`. Ordinary exact-file scans do
+  not require them.
 - Automatic removal requires macOS or Linux with POSIX directory-descriptor
   support. Reports and ordinary review do not require this capability.
 
@@ -45,7 +53,8 @@ For direct Terminal use, add `export PATH="$HOME/.local/bin:$PATH"` to
 launcher contains absolute paths, so recreate it if the repository or virtual
 environment moves.
 
-The utility has no configuration settings or secrets.
+The utility has no environment settings or secrets. Similar-name sensitivity and
+audio command timeouts are configured with the CLI options below.
 
 ## Terminal option selector
 
@@ -61,15 +70,18 @@ Choose a number, then the selected operation runs and exits:
 2. **Review keepers** — read-only, one group at a time.
 3. **Preview automatic removal** — lists keepers, removals, and skipped groups without changes.
 4. **Automatically remove numbered and same-name copies** — shows the plan, then asks for confirmation.
+5. **Review similar names and verify audio** — read-only report of verified audio groups and other name candidates.
+6. **Remove verified audio copies with similar names** — shows the audio groups and keeper/removal plan, then asks for confirmation.
+7. **Choose keepers for exact copies, then confirm removal** — select one keeper per byte-identical group, skip groups as needed, inspect the fixed plan, and confirm permanent removal.
 
 Enter `q` or press Ctrl-C to quit the menu without scanning or changing files.
-On macOS, option 4 displays a native **Remove Duplicates** confirmation with
+On macOS, options 4, 6, and 7 display a native **Remove Duplicates** confirmation with
 **Cancel** selected by default. It explains that removal is permanent and that
 keepers and skipped groups remain unchanged. Cancelling or letting the dialog
 expire removes nothing. Other platforms use the typed `DELETE` confirmation.
 
 `--menu` requires an interactive terminal and cannot be combined with `--review`,
-`--auto-remove`, `--dry-run`, or `--output`. The macOS dialog requires the built-in
+`--auto-remove`, `--remove-reviewed`, `--dry-run`, `--similar`, or `--output`. The macOS dialog requires the built-in
 `/usr/bin/osascript` and expires after 120 seconds; use `--dialog-timeout SECONDS`
 with `--menu` to change that limit (1–3600). Direct commands below keep their
 existing behavior, including a read-only report when no mode flag is supplied.
@@ -124,6 +136,26 @@ directory, or symlink. The manifest is published atomically and contains:
 
 The manifest records review choices, not completed removals. There is no command
 to apply a saved manifest; automatic removal always performs a fresh scan.
+
+## Remove exact duplicates with chosen keepers
+
+Use menu option **7** or run:
+
+```bash
+music-dupes --review --remove-reviewed "/path/to/music folder"
+```
+
+The tool reports byte-for-byte duplicate groups, then asks which numbered path
+to keep in each group. Enter `s` to leave a group untouched. Enter `q` or press
+Ctrl-C to cancel the entire removal run; earlier choices are discarded. After
+all groups are reviewed, it prints every `KEEP`, `REMOVE`, and `SKIP` decision.
+In Terminal, type `DELETE` exactly to confirm; the Finder menu uses a native
+macOS confirmation. Any other response leaves all files untouched. Groups with
+different filenames can be selected because the complete file contents must
+match. Hard-linked files or changed files block removal during revalidation.
+This operation is permanent and does not use Trash. Plain `--review` remains
+read-only, and `--remove-reviewed` cannot be combined with `--similar`,
+`--auto-remove`, `--dry-run`, or `--output`.
 
 ## Automatically remove numbered and same-name duplicate copies
 
@@ -199,6 +231,71 @@ Exit status is `0` for a successful report or deliberately shortened review,
 non-interactive menu/review/removal (except automatic `--dry-run`). Cancelling the
 removal confirmation returns `0` with no deletions.
 
+## Similar names and identical audio with different metadata
+
+For collections with `-1` copies, truncated titles, track-number prefixes, or
+different metadata, use the additional audio verification mode:
+
+```bash
+# Read-only report of verified groups and other similar-name candidates.
+music-dupes --similar "/path/to/music folder"
+
+# Preview which copies would be kept and removed, without prompts or writes.
+music-dupes --similar --review --auto-remove --dry-run "/path/to/music folder"
+
+# Show a fresh plan, then require typing DELETE before permanent removal.
+music-dupes --similar --review --auto-remove "/path/to/music folder"
+```
+
+Finder menu **5** opens the report; **6** opens the confirmed removal flow with
+the native macOS dialog. Existing menu options 1–4 retain their exact-file rules.
+`--similar --review` offers read-only keeper selection for verified audio groups.
+`--output` is not supported with `--similar`.
+
+Names are suggestions, never proof. Candidate matching ignores case, accents,
+extensions, track-number and `Unknown Artist` prefixes, common copy suffixes
+(` [2]`, `-1`, `(2)`), and some trailing download-site text. It compares names
+sharing a useful word or initial prefix, allowing minor spelling differences
+and truncated titles. `--similarity NUMBER` sets the minimum name score from
+0.5 to 1.0 (default 0.86). The score is a text heuristic, not a probability that
+two recordings match. Unrelated filenames may be missed; different remixes can
+appear as candidates. Lowering the threshold considers more candidates and
+takes longer.
+
+Every candidate is hashed and its full audio decoded locally with FFmpeg. The
+comparison preserves sample rate, channel count/layout, and decoded sample
+precision; it does not resample, change volume, trim silence, or apply a fuzzy
+audio threshold. Tags and artwork are excluded. Exact decoded-audio matches
+form one group regardless of the number of copies or original whole-file hashes.
+The report labels other name matches **DIFFERENT AUDIO** or **UNVERIFIED / ERROR**;
+they are not eligible for removal together. Different encodings of the same
+recording can produce different samples and remain separate.
+
+For a verified group, the keeper is closest to the selected root. At that depth,
+an unnumbered filename is preferred; remaining ties are chosen randomly once
+per plan. All other independent copies in the group are removal candidates.
+**Tags, artwork, cue points, and encoding may differ; removal preserves only the
+keeper's metadata.** Review the displayed paths before confirming. The tool does
+not merge tags or select the most complete metadata automatically.
+
+The entire plan is revalidated using each file's original whole-file hash before
+any deletion, including its metadata. The existing locked-file, symlink,
+hard-link, and per-deletion keeper checks still apply. Scan, file-read, or
+changed-file errors block automatic removal for the run. Files that FFmpeg
+cannot verify (including decoder timeouts) are explicitly excluded from removal;
+other independently verified groups can still be removed after confirmation.
+No audio files are modified during analysis.
+
+`--audio-timeout SECONDS` limits each FFprobe/FFmpeg command (1–3600, default 120).
+Decoding can take considerably longer than ordinary hashing; progress shows the
+current stage and file. The summary includes decoded files, reuse of results
+for byte-identical files, candidate pairs, verified groups, unverified files,
+errors, and elapsed time. A run with unverified files returns exit status `1`,
+even when the verified portion completes successfully. Results are reused only
+within a run; there is no persistent audio cache,
+and a new run rescans and verifies the files. Ctrl-C during analysis changes no
+music files.
+
 ## Finder Quick Action
 
 Install the `music-dupes` launcher first, then install or update the Finder
@@ -213,8 +310,8 @@ if it does not appear. On first use, allow the workflow to control Terminal.
 
 Control-click a music folder and choose **Quick Actions → Music Duplicates —
 Review**. Terminal opens `music-dupes --menu` for the selected folder, letting
-you choose report, manual review, automatic preview, or confirmed automatic
-removal. The action keeps its existing Finder name so reinstalling updates it
+you choose exact-file report/review/removal or similar-name audio verification
+and confirmed removal. The action keeps its existing Finder name so reinstalling updates it
 in place. The menu does not write manifests; use the Terminal command with
 `--review --output` when decisions need to be saved.
 

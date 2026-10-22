@@ -104,6 +104,7 @@ class SimilarResult:
     errors: tuple[ScanError, ...]
     decoded_files: int
     reused_files: int
+    unverified: tuple[ScanError, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -321,6 +322,7 @@ def find_similar_groups(
     hashes: dict[Path, str] = {}
     errors: list[ScanError] = []
     decoded = reused = 0
+    unverified: list[ScanError] = []
     for index, record in enumerate(records, start=1):
         try:
             if progress:
@@ -331,7 +333,15 @@ def find_similar_groups(
                 if progress:
                     progress(f"Decoding audio {index}/{len(records)}", record.path)
                 decoded += 1
-                signature = signature_reader(record.path)
+                try:
+                    signature = signature_reader(record.path)
+                except OSError as error:
+                    if not same_identity(record, record.path.lstat()):
+                        raise FileChangedError("file changed during audio verification") from error
+                    # An undecodable file provides no evidence and cannot enter
+                    # a verified group. Other independently verified files remain usable.
+                    unverified.append(ScanError(record.path, str(error)))
+                    continue
             else:
                 reused += 1
             if not same_identity(record, record.path.lstat()):
@@ -347,7 +357,7 @@ def find_similar_groups(
         for signature, members in grouped.items() if len(members) > 1
     ]
     groups.sort(key=lambda group: path_key(group.files[0].path, root))
-    return SimilarResult(pairs, tuple(groups), tuple(errors), decoded, reused)
+    return SimilarResult(pairs, tuple(groups), tuple(errors), decoded, reused, tuple(unverified))
 
 
 def render_similar_report(
@@ -355,13 +365,27 @@ def render_similar_report(
 ) -> None:
     console.print("\n[bold]Similar-name review — no files changed[/bold]")
     console.print("Names suggest candidates only. Removal requires identical decoded audio.")
+    console.print("Tags, artwork, and cue points may differ; removal retains only the keeper's metadata.")
     memberships = {
         record.path: index for index, group in enumerate(result.groups) for record in group.files
     }
-    failed = {error.path for error in result.errors}
+    failed = {error.path for error in (*result.errors, *result.unverified)}
+    for number, group in enumerate(result.groups, start=1):
+        table = Table(box=box.SIMPLE, header_style="bold cyan")
+        table.add_column("Path")
+        table.add_column("File size", justify="right")
+        for record in group.files:
+            table.add_row(Text(relative_display(record.path, root)), format_bytes(record.size))
+        console.print(Panel(
+            table, title=f"VERIFIED AUDIO GROUP {number} · {len(group.files)} copies",
+            subtitle="Identical decoded audio; tags and whole-file hashes may differ",
+        ))
+    console.print("[bold]Other similar-name candidates (not eligible for removal together)[/bold]")
     for pair in result.pairs:
         verified = pair.first in memberships and memberships.get(pair.second) == memberships[pair.first]
-        label = "VERIFIED AUDIO" if verified else (
+        if verified:
+            continue
+        label = (
             "UNVERIFIED / ERROR" if {pair.first, pair.second} & failed else "DIFFERENT AUDIO"
         )
         console.print(f"{label} · name similarity {pair.similarity:.0%}")
@@ -369,10 +393,13 @@ def render_similar_report(
             console.print(f"  {relative_display(path, root)}", markup=False)
     for error in (*scan.errors, *result.errors):
         console.print(f"Error: {error.path}: {error.detail}", markup=False)
+    for error in result.unverified:
+        console.print(f"Unverified (excluded from removal): {error.path}: {error.detail}", markup=False)
     console.print(
         f"Summary: {len(scan.files)} audio files · {len(result.pairs)} similar-name pairs · "
         f"{len(result.groups)} verified audio groups · {result.decoded_files} decoded · "
         f"{result.reused_files} identical-file results reused · "
+        f"{len(result.unverified)} unverified files · "
         f"{len(scan.errors) + len(result.errors)} errors · {elapsed:.2f}s"
     )
 
@@ -488,9 +515,10 @@ def render_report(
 def render_review_group(
     console: Console, root: Path, group: DuplicateGroup, number: int, total: int
 ) -> None:
+    description = "identical decoded audio; metadata may differ" if group.file_hashes else f"{format_bytes(group.size)} each"
     console.print(
         f"\n[bold cyan]Review group {number}/{total}[/bold cyan] "
-        f"({format_bytes(group.size)} each)"
+        f"({description})"
     )
     for index, record in enumerate(group.files, start=1):
         console.print(f"  [bold]{index}[/bold]  {relative_display(record.path, root)}")
@@ -500,14 +528,14 @@ def review_groups(
     console: Console,
     root: Path,
     groups: Sequence[DuplicateGroup],
-    input_func: Callable[[str], str] = input,
+    input_func: Callable[[str], str] | None = None,
 ) -> tuple[ReviewDecision, ...]:
     decisions: list[ReviewDecision] = []
     for group_index, group in enumerate(groups):
         render_review_group(console, root, group, group_index + 1, len(groups))
         while True:
             try:
-                answer = input_func(
+                answer = (input_func or input)(
                     "Choose the keeper number, [s]kip this group, or [q]uit: "
                 ).strip().casefold()
             except EOFError:
@@ -578,12 +606,13 @@ def automatic_review(
 
 def render_removal_plan(
     console: Console, root: Path, decisions: Sequence[ReviewDecision],
+    skip_reason: str = "ambiguous filenames or hard-linked paths",
 ) -> int:
     count = 0
     console.print("\n[bold]Automatic removal plan[/bold]")
     for decision in decisions:
         if decision.status != "reviewed":
-            console.print("SKIP group: ambiguous filenames or hard-linked paths.")
+            console.print(f"SKIP group: {skip_reason}.")
             for record in decision.group.files:
                 console.print(f"  {relative_display(record.path, root)}", markup=False)
             continue
@@ -715,8 +744,9 @@ def run_automatic_removal(
     decisions: Sequence[ReviewDecision], dry_run: bool,
     input_func: Callable[[str], str] | None = None,
     confirm_func: Callable[[int], bool] | None = None,
+    skip_reason: str = "ambiguous filenames or hard-linked paths",
 ) -> int:
-    count = render_removal_plan(console, root, decisions)
+    count = render_removal_plan(console, root, decisions, skip_reason)
     if dry_run or not count:
         console.print(
             "Removal summary: 0 removed · preview only"
@@ -779,19 +809,20 @@ def choose_mode(
     console.print("4  Automatically remove numbered and same-name copies (confirmation required)")
     console.print("5  Review similar names and verify audio (read-only)")
     console.print("6  Remove verified audio copies with similar names (confirmation required)")
+    console.print("7  Choose keepers for exact copies, then confirm removal")
     console.print("q  Quit")
     modes = {"1": "report", "2": "review", "3": "preview", "4": "remove",
-             "5": "similar", "6": "similar-remove"}
+             "5": "similar", "6": "similar-remove", "7": "manual-remove"}
     while True:
         try:
-            answer = (input_func or input)("Choose an option [1-6, q] (default: 1): ").strip().casefold()
+            answer = (input_func or input)("Choose an option [1-7, q] (default: 1): ").strip().casefold()
         except (EOFError, KeyboardInterrupt):
             return None
         if answer == "q":
             return None
         if answer in modes or not answer:
             return modes.get(answer, "report")
-        console.print("[yellow]Enter 1, 2, 3, 4, 5, 6, or q.[/yellow]")
+        console.print("[yellow]Enter 1, 2, 3, 4, 5, 6, 7, or q.[/yellow]")
 
 
 REMOVAL_DIALOG_SCRIPT = '''on run argv
@@ -799,7 +830,7 @@ REMOVAL_DIALOG_SCRIPT = '''on run argv
     set fileCount to item 2 of argv
     set waitSeconds to (item 3 of argv) as integer
     try
-        set resultDialog to display dialog "Permanently remove " & fileCount & " duplicate files from:" & return & return & folderPath & return & return & "This does not use Trash. Original keepers and skipped groups will remain unchanged." buttons {"Cancel", "Remove Duplicates"} default button "Cancel" cancel button "Cancel" with title "Music Duplicates" with icon caution giving up after waitSeconds
+        set resultDialog to display dialog "Permanently remove " & fileCount & " duplicate files from:" & return & return & folderPath & return & return & "This does not use Trash. Original keepers and skipped groups will remain unchanged. For decoded-audio matches, tags, artwork and cue points may differ; only the keeper's metadata survives." buttons {"Cancel", "Remove Duplicates"} default button "Cancel" cancel button "Cancel" with title "Music Duplicates" with icon caution giving up after waitSeconds
         if gave up of resultDialog then return "cancel"
         return button returned of resultDialog
     on error number -128
@@ -916,12 +947,31 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--review",
         action="store_true",
-        help="choose a keeper for each group (interactive unless --auto-remove)",
+        help="choose a keeper for each group (read-only unless --remove-reviewed; "
+             "automatic choices with --auto-remove)",
+    )
+    parser.add_argument(
+        "--similar", action="store_true",
+        help="review similar filenames and verify decoded audio (requires FFmpeg); read-only unless --review --auto-remove",
+    )
+    parser.add_argument(
+        "--similarity", type=float, default=0.86,
+        help="minimum filename similarity for --similar (0.5–1.0; default: 0.86)",
+    )
+    parser.add_argument(
+        "--audio-timeout", type=int, default=120,
+        help="timeout per audio probe/decoder command in --similar mode (1–3600 seconds; default: 120)",
     )
     parser.add_argument(
         "--auto-remove", action="store_true",
         help="with --review, remove numbered and same-name copies; prefer shallow originals, "
-             "choose depth ties randomly, and confirm permanent removal",
+             "choose depth ties randomly, and confirm permanent removal; with --similar, "
+             "remove only verified audio copies and prefer the shallowest keeper",
+    )
+    parser.add_argument(
+        "--remove-reviewed", action="store_true",
+        help="with --review, choose keepers for exact-file groups, show a fixed plan, "
+             "then confirm permanent removal; s skips a group and q cancels the run",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -943,8 +993,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not 1 <= args.dialog_timeout <= 3600:
         error_console.print("Error: --dialog-timeout must be between 1 and 3600 seconds")
         return 2
-    if args.menu and (args.review or args.auto_remove or args.dry_run or args.output is not None):
-        error_console.print("Error: --menu cannot be combined with --review, --auto-remove, --dry-run, or --output")
+    if not 0.5 <= args.similarity <= 1.0:
+        error_console.print("Error: --similarity must be between 0.5 and 1.0")
+        return 2
+    if not 1 <= args.audio_timeout <= 3600:
+        error_console.print("Error: --audio-timeout must be between 1 and 3600 seconds")
+        return 2
+    if args.similar and args.output is not None:
+        error_console.print("Error: --output cannot be combined with --similar")
+        return 2
+    if args.remove_reviewed and (not args.review or args.auto_remove or args.dry_run or args.similar or args.output is not None):
+        error_console.print("Error: --remove-reviewed requires --review and cannot be combined with --auto-remove, --dry-run, --similar, or --output")
+        return 2
+    if args.menu and (args.review or args.auto_remove or args.remove_reviewed or args.dry_run or args.similar or args.output is not None):
+        error_console.print("Error: --menu cannot be combined with --review, --auto-remove, --remove-reviewed, --dry-run, --similar, or --output")
         return 2
     if args.menu and not sys.stdin.isatty():
         error_console.print("Error: --menu requires an interactive terminal")
@@ -958,7 +1020,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.auto_remove and args.output is not None:
         error_console.print("Error: --output cannot be combined with --auto-remove")
         return 2
-    if args.auto_remove and not args.dry_run and not removal_supported():
+    if (args.auto_remove and not args.dry_run or args.remove_reviewed) and not removal_supported():
         error_console.print("Error: safe removal requires POSIX dir_fd support (macOS or Linux)")
         return 2
     if args.output is not None and not args.review:
@@ -987,14 +1049,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         if mode is None:
             console.print("Menu closed · no files changed")
             return 0
-        args.review = mode in {"review", "preview", "remove"}
-        args.auto_remove = mode in {"preview", "remove"}
+        args.review = mode in {"review", "preview", "remove", "similar-remove", "manual-remove"}
+        args.auto_remove = mode in {"preview", "remove", "similar-remove"}
+        args.remove_reviewed = mode == "manual-remove"
+        args.similar = mode in {"similar", "similar-remove"}
         args.dry_run = mode == "preview"
-        if mode == "remove" and not removal_supported():
+        if (args.auto_remove and not args.dry_run or args.remove_reviewed) and not removal_supported():
             error_console.print("Error: safe removal requires POSIX dir_fd support (macOS or Linux)")
             return 2
-        if mode == "remove" and sys.platform == "darwin" and not Path("/usr/bin/osascript").is_file():
+        if (args.auto_remove and not args.dry_run or args.remove_reviewed) and sys.platform == "darwin" and not Path("/usr/bin/osascript").is_file():
             error_console.print("Error: macOS menu removal requires /usr/bin/osascript")
+            return 2
+    ffmpeg = ffprobe = None
+    if args.similar:
+        ffmpeg, ffprobe = shutil.which("ffmpeg"), shutil.which("ffprobe")
+        if not ffmpeg or not ffprobe:
+            error_console.print("Error: --similar requires ffmpeg and ffprobe on PATH (brew install ffmpeg)")
             return 2
     if args.output is not None:
         requested_output = args.output.expanduser()
@@ -1020,22 +1090,55 @@ def main(argv: Sequence[str] | None = None) -> int:
     with console.status("[bold cyan]Scanning audio files…[/bold cyan]"):
         scan = scan_audio_files(root)
 
-    status = console.status("[bold cyan]Preparing hashes…[/bold cyan]")
-    with status:
-        search = find_duplicate_groups(
-            root,
-            scan.files,
-            progress=lambda path, index, total: status.update(
-                f"[bold cyan]Hashing {index}/{total}:[/bold cyan] "
-                f"{relative_display(path, root)}"
-            ),
-        )
+    search: SearchResult | SimilarResult
+    try:
+        with console.status("[bold cyan]Preparing comparisons…[/bold cyan]") as status:
+            if args.similar:
+                assert ffmpeg is not None and ffprobe is not None
+                search = find_similar_groups(
+                    root, scan.files, args.similarity,
+                    lambda path: decoded_signature(path, ffmpeg, ffprobe, args.audio_timeout),
+                    progress=lambda stage, path: status.update(Text(f"{stage}: {relative_display(path, root)}")),
+                )
+            else:
+                search = find_duplicate_groups(
+                    root, scan.files,
+                    progress=lambda path, index, total: status.update(
+                        Text(f"Hashing {index}/{total}: {relative_display(path, root)}")
+                    ),
+                )
+    except KeyboardInterrupt:
+        error_console.print("Analysis interrupted · no files changed")
+        return 1
     elapsed = time.monotonic() - started
-    render_report(console, root, scan, search, elapsed)
+    if isinstance(search, SimilarResult):
+        render_similar_report(console, root, scan, search, elapsed)
+    else:
+        render_report(console, root, scan, search, elapsed)
 
     all_errors = (*scan.errors, *search.errors)
+    unverified = search.unverified if isinstance(search, SimilarResult) else ()
+    if args.remove_reviewed:
+        if all_errors:
+            error_console.print("Removal summary: 0 removed · scan errors must be resolved first")
+            return 1
+        try:
+            decisions = review_groups(console, root, search.groups)
+        except KeyboardInterrupt:
+            error_console.print("Removal summary: 0 removed · review interrupted")
+            return 1
+        if any(decision.status == "unreviewed" for decision in decisions):
+            console.print("Removal summary: 0 removed · review cancelled")
+            return 0
+        confirm_func = None
+        if args.menu and sys.platform == "darwin":
+            confirm_func = lambda count: confirm_macos_removal(root, count, args.dialog_timeout)
+        return run_automatic_removal(
+            console, error_console, root, decisions, False, confirm_func=confirm_func,
+            skip_reason="skipped by reviewer",
+        )
     if args.auto_remove:
-        decisions = automatic_review(search.groups)
+        decisions = audio_review(search.groups) if args.similar else automatic_review(search.groups)
         if all_errors:
             render_removal_plan(console, root, decisions)
             error_console.print("Removal summary: 0 removed · scan errors must be resolved first")
@@ -1043,10 +1146,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         confirm_func = None
         if args.menu and sys.platform == "darwin":
             confirm_func = lambda count: confirm_macos_removal(root, count, args.dialog_timeout)
-        return run_automatic_removal(
+        result_code = run_automatic_removal(
             console, error_console, root, decisions, args.dry_run,
             confirm_func=confirm_func,
         )
+        return 1 if unverified and result_code == 0 else result_code
     if args.review:
         try:
             decisions = review_groups(console, root, search.groups)
@@ -1072,7 +1176,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 1
             console.print(f"Review manifest written to [bold]{args.output.resolve()}[/bold]")
 
-    return 1 if all_errors else 0
+    return 1 if all_errors or unverified else 0
 
 
 if __name__ == "__main__":

@@ -50,21 +50,20 @@ def find_name_pairs(
     names = [normalized_name(path) for path in ordered]
     ignored = {"original", "mix", "remix", "unknown", "artist", "feat", "the", "and"}
     postings: dict[str, list[int]] = defaultdict(list)
+    keys: list[set[str]] = []
     for index, name in enumerate(names):
         words = {word for word in name.split() if len(word) >= 3 and word not in ignored}
+        if name:
+            words.add("prefix:" + name[:8])
+        keys.append(words)
         for word in words:
             postings[word].append(index)
-        if name:
-            postings["prefix:" + name[:8]].append(index)
-    neighbors: dict[int, set[int]] = defaultdict(set)
-    for indexes in postings.values():
-        for offset, first in enumerate(indexes):
-            neighbors[first].update(indexes[offset + 1:])
     pairs: list[NamePair] = []
     for first, path in enumerate(ordered):
         if progress:
             progress(path, first + 1, len(ordered))
-        for second in sorted(neighbors[first]):
+        neighbors = {index for word in keys[first] for index in postings[word] if index > first}
+        for second in sorted(neighbors):
             left, right = names[first], names[second]
             if not left or not right:
                 continue
@@ -88,7 +87,7 @@ def decoded_signature(
     """Hash lossless PCM at the source rate/channels, with no resampling."""
     try:
         probe = runner(
-            [ffprobe, "-v", "error", "-select_streams", "a",
+            [ffprobe, "-v", "error", "-protocol_whitelist", "file,pipe", "-select_streams", "a",
              "-show_entries", "stream=sample_rate,channels,channel_layout,sample_fmt",
              "-of", "json", str(path)],
             capture_output=True, text=True, check=True, timeout=timeout,
@@ -103,14 +102,15 @@ def decoded_signature(
         # Float64 preserves decoded floating-point samples and all int32 values.
         # Forcing int16/int32 could hide small differences by quantizing floats.
         result = runner(
-            [ffmpeg, "-v", "error", "-nostdin", "-xerror", "-i", str(path),
+            [ffmpeg, "-v", "error", "-nostdin", "-xerror", "-protocol_whitelist", "file,pipe", "-i", str(path),
              "-map", "0:a:0", "-c:a", "pcm_f64le", "-f", "hash", "-hash", "sha256", "-"],
             capture_output=True, text=True, check=True, timeout=timeout,
         )
         match = re.fullmatch(r"SHA256=([0-9a-f]{64})\s*", result.stdout)
         if not match or match[1] == hashlib.sha256(b"").hexdigest():
             raise ValueError("missing or empty decoded audio hash")
-        return AudioSignature(rate, channels, stream.get("channel_layout", ""), match[1])
+        layout = stream.get("channel_layout") or {1: "mono", 2: "stereo"}.get(channels, "unspecified")
+        return AudioSignature(rate, channels, layout, match[1])
     except subprocess.TimeoutExpired as error:
         raise OSError(f"audio verification timed out after {timeout}s") from error
     except subprocess.CalledProcessError as error:

@@ -27,6 +27,8 @@ class MenuTests(unittest.TestCase):
     def test_selector_modes_and_safe_default(self):
         for answer, expected in (("1", "report"), ("2", "review"),
                                  ("3", "preview"), ("4", "remove"),
+                                 ("5", "similar"), ("6", "similar-remove"),
+                                 ("7", "manual-remove"),
                                  ("", "report"), (" Q ", None)):
             self.assertEqual(dupes.choose_mode(
                 self.console, self.root, lambda _: answer,
@@ -73,6 +75,60 @@ class MenuTests(unittest.TestCase):
                 mock.patch.object(dupes, "confirm_macos_removal", side_effect=OSError("failed")):
             self.assertEqual(self.run_menu("4"), 1)
         self.assertTrue((self.root / "Track [2].mp3").exists())
+
+    def test_similar_menu_report_never_removes_and_removal_requires_confirmation(self):
+        signature = dupes.AudioSignature(44100, 2, "stereo", "a" * 64)
+        with mock.patch.object(dupes, "decoded_signature", return_value=signature), \
+                mock.patch.object(dupes.shutil, "which", side_effect=lambda name: name), \
+                mock.patch.object(dupes.sys, "platform", "darwin"), \
+                mock.patch.object(dupes, "confirm_macos_removal", return_value=False) as confirm:
+            self.assertEqual(self.run_menu("5"), 0)
+            confirm.assert_not_called()
+            self.assertEqual(self.run_menu("6"), 0)
+            confirm.assert_called_once_with(self.root, 1, 120)
+            self.assertTrue((self.root / "Track [2].mp3").exists())
+        with mock.patch.object(dupes, "decoded_signature", return_value=signature), \
+                mock.patch.object(dupes.shutil, "which", side_effect=lambda name: name), \
+                mock.patch.object(dupes.sys, "platform", "darwin"), \
+                mock.patch.object(dupes, "confirm_macos_removal", return_value=True):
+            self.assertEqual(self.run_menu("6"), 0)
+        self.assertFalse((self.root / "Track [2].mp3").exists())
+
+    def test_similar_menu_missing_ffmpeg_never_scans_or_confirms(self):
+        with mock.patch.object(dupes.shutil, "which", return_value=None), \
+                mock.patch.object(dupes, "scan_audio_files") as scan, \
+                mock.patch.object(dupes, "confirm_macos_removal") as confirm:
+            self.assertEqual(self.run_menu("6"), 2)
+            scan.assert_not_called()
+            confirm.assert_not_called()
+
+    def test_manual_exact_removal_requires_review_and_native_confirmation(self):
+        for allowed in (False, True):
+            with mock.patch("sys.stdin.isatty", return_value=True), \
+                    mock.patch("builtins.input", side_effect=("7", "1")), \
+                    mock.patch.object(dupes.sys, "platform", "darwin"), \
+                    mock.patch.object(dupes, "confirm_macos_removal", return_value=allowed) as confirm:
+                self.assertEqual(dupes.main(["--menu", str(self.root)]), 0)
+                confirm.assert_called_once_with(self.root, 1, 120)
+            self.assertEqual((self.root / "Track.mp3").exists(), not allowed)
+            self.assertTrue((self.root / "Track [2].mp3").exists())
+
+    def test_manual_exact_removal_quit_and_skip_do_not_confirm(self):
+        for answer in ("q", "s"):
+            with mock.patch("sys.stdin.isatty", return_value=True), \
+                    mock.patch("builtins.input", side_effect=("7", answer)), \
+                    mock.patch.object(dupes, "confirm_macos_removal") as confirm, \
+                    mock.patch.object(dupes, "execute_removal") as execute:
+                self.assertEqual(dupes.main(["--menu", str(self.root)]), 0)
+                confirm.assert_not_called()
+                execute.assert_not_called()
+            self.assertTrue((self.root / "Track.mp3").exists())
+            self.assertTrue((self.root / "Track [2].mp3").exists())
+
+    def test_manual_exact_removal_rejects_incompatible_flags(self):
+        with mock.patch("sys.stdin.isatty", return_value=True):
+            for flags in ((), ("--auto-remove",), ("--similar",), ("--output", "choices.json")):
+                self.assertEqual(dupes.main(["--remove-reviewed", *flags, str(self.root)]), 2)
 
     def test_menu_requires_tty_and_rejects_mode_flags_and_invalid_timeout(self):
         with mock.patch("sys.stdin.isatty", return_value=False):
