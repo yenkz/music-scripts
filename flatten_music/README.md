@@ -34,9 +34,9 @@ The output uses Rich to provide colored summaries and before/after tables. Color
 is enabled automatically in a terminal and omitted cleanly when redirected to a
 file.
 
-### Install the `fm` command on macOS
+### Install the `flatten-music` command on macOS
 
-The Finder workflow expects an `fm` launcher at `~/.local/bin/fm`. From the
+The Finder workflow expects an `flatten-music` launcher at `~/.local/bin/flatten-music`. From the
 repository root:
 
 ```bash
@@ -48,47 +48,59 @@ repo_path="$PWD"
 printf '#!/bin/zsh\nexec %q %q "$@"\n' \
   "$repo_path/.venv/bin/python" \
   "$repo_path/flatten_music/flatten_music.py" \
-  > "$HOME/.local/bin/fm"
-chmod +x "$HOME/.local/bin/fm"
+  > "$HOME/.local/bin/flatten-music"
+chmod +x "$HOME/.local/bin/flatten-music"
 ```
 
 For direct Terminal use, add `export PATH="$HOME/.local/bin:$PATH"` to
-`~/.zshrc`, open a new Terminal window, and verify `fm --help`. Recreate the
+`~/.zshrc`, open a new Terminal window, and verify `flatten-music --help`. Recreate the
 launcher if the repository or virtual environment is moved.
 
 ## Usage
 
-Preview the operation first:
+An explicit folder is required. The default is a strictly read-only preview:
 
 ```bash
-python3 /path/to/music-scripts/flatten_music/flatten_music.py --dry-run /path/to/music-folder
+flatten-music "/path/to/music-folder"
+flatten-music --dry-run "/path/to/music-folder"
+flatten-music --apply "/path/to/music-folder"
 ```
 
-Run it:
+`--apply` displays the complete plan and resolved target, then requires typing
+`FLATTEN` exactly. Any other response, EOF, or Ctrl-C cancels. `--dry-run` always
+wins over `--apply` and never prompts or changes files. There is no unattended
+confirmation bypass. `--skip-rename` skips metadata reading and audio renaming;
+it still uses every safety check and requires `--apply` to move files. `--help`
+shows all flags. Direct script invocation accepts the same arguments:
 
 ```bash
-python3 /path/to/music-scripts/flatten_music/flatten_music.py /path/to/music-folder
+.venv/bin/python "flatten_music/flatten_music.py" --dry-run "/path/to/music-folder"
 ```
 
-If the script is copied into the folder you want to process, the directory can
-be omitted:
+Filesystem roots, your home folder, folders without supported audio extensions,
+and trees containing common software-project markers are refused (exit 2).
+Markers include `.git`, `.hg`, `.svn`, `node_modules`, `.venv`, `venv`,
+`package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `CMakeLists.txt`, and
+`AGENTS.md`. Audio detection uses extensions, not content verification, and these
+checks cannot prove that a folder is safe. Use a dedicated music folder.
 
-```bash
-python3 flatten_music.py --dry-run
-python3 flatten_music.py
-```
+Artwork, documents, and other companion files still move with the audio; their
+count is called out in a warning. Back up the folder before applying changes.
+The file list and source stats are checked again after confirmation; changes
+require a fresh preview. Operational errors return 1; success or cancellation
+returns 0. No credentials, environment settings, cache, or network are used.
 
-The script itself remains in the root because it is already there and is not an
-audio file. To flatten without installing Mutagen or renaming audio, add
-`--skip-rename`.
+### Migrating from `fm`
 
-The report lists all changes first and leaves the summary at the bottom, where
-it remains visible when a long dry run finishes.
+Create the `flatten-music` launcher above and reinstall the Finder workflow.
+Inspect `type -a fm` and `cat "$HOME/.local/bin/fm"`. Remove the old file only if
+it is this repository's launcher; remove any old `fm` alias from your shell
+configuration, then run `rehash`. Do not remove an Apple-provided command.
 
 ## Finder Quick Action installation and usage
 
 The version-controlled **Flatten Music** workflow is in
-[`finder_workflows/`](finder_workflows/). After installing the `fm` launcher,
+[`finder_workflows/`](finder_workflows/). After installing the `flatten-music` launcher,
 install or update it from the repository root:
 
 ```bash
@@ -100,13 +112,13 @@ The installer copies the workflow into `~/Library/Services`. Enable it under
 listed in Finder. On first use, allow the action to control Terminal.
 
 To use it, Control-click a folder in Finder and choose **Quick Actions → Flatten
-Music**. Terminal opens and runs a read-only `fm --dry-run` first. Review the
-complete plan; the same Terminal window then asks `Run for real? [y/N]`. Enter
-`y` only when the preview is correct. Any other response leaves the collection
-unchanged.
+Music**. Terminal opens and runs a read-only `flatten-music --dry-run` first. Review the
+complete plan; the same Terminal window runs `flatten-music --apply`, displays its
+plan again, and asks you to type `FLATTEN`. Confirm only when the preview is
+correct. Any other response leaves the collection unchanged.
 
 Rerun the installer after pulling workflow updates. The workflow resolves
-`~/.local/bin/fm` dynamically and does not embed the original contributor's
+`~/.local/bin/flatten-music` dynamically and does not embed the original contributor's
 repository path.
 
 ## Tests

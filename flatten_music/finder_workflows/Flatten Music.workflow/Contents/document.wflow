@@ -51,8 +51,30 @@
 				<key>ActionParameters</key>
 				<dict>
 					<key>source</key>
-					<string>on run {input, parameters}	set homePath to POSIX path of (path to home folder)	set fmPath to homePath &amp; ".local/bin/fm"	set fmCommand to "/bin/zsh " &amp; quoted form of fmPath		repeat with selectedFolder in input		set folderPath to POSIX path of selectedFolder				set shellCommand to fmCommand &amp; " --dry-run " &amp; quoted form of folderPath &amp; ¬			" &amp;&amp; printf '
-Run for real? [y/N] '" &amp; ¬			" &amp;&amp; read -r answer" &amp; ¬			" &amp;&amp; [[ \"$answer\" = [yY] ]]" &amp; ¬			" &amp;&amp; " &amp; fmCommand &amp; " " &amp; quoted form of folderPath				tell application "Terminal"			activate			set fmTab to do script ""			delay 1			repeat while (busy of fmTab)				delay 0.1			end repeat			do script shellCommand in fmTab		end tell	end repeat		return inputend run</string>
+					<string>on run {input, parameters}
+	set homePath to POSIX path of (path to home folder)
+	set fmPath to homePath &amp; ".local/bin/flatten-music"
+	set fmCommand to "/bin/zsh " &amp; quoted form of fmPath
+
+	repeat with selectedFolder in input
+		set folderPath to POSIX path of selectedFolder
+
+		set shellCommand to fmCommand &amp; " --dry-run " &amp; quoted form of folderPath &amp; ¬
+			" &amp;&amp; " &amp; fmCommand &amp; " --apply " &amp; quoted form of folderPath
+
+		tell application "Terminal"
+			activate
+			set fmTab to do script ""
+			delay 1
+			repeat while (busy of fmTab)
+				delay 0.1
+			end repeat
+			do script shellCommand in fmTab
+		end tell
+	end repeat
+
+	return input
+end run</string>
 				</dict>
 				<key>BundleIdentifier</key>
 				<string>com.apple.Automator.RunScript</string>

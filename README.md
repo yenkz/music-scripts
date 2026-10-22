@@ -26,7 +26,7 @@ See each subproject's README for setup and usage instructions.
 
 ## macOS installation
 
-The Finder workflows call small `fm`, `cm`, `music-dupes`, `music-bitrate`, and `music-crates` launchers in
+The Finder workflows call small `flatten-music`, `cm`, `music-dupes`, `music-bitrate`, and `music-crates` launchers in
 `~/.local/bin`. Run the complete setup from the repository root:
 
 ```bash
@@ -43,7 +43,7 @@ repo_path="$PWD"
 printf '#!/bin/zsh\nexec %q %q "$@"\n' \
   "$repo_path/.venv/bin/python" \
   "$repo_path/flatten_music/flatten_music.py" \
-  > "$HOME/.local/bin/fm"
+  > "$HOME/.local/bin/flatten-music"
 printf '#!/bin/zsh\nexec %q %q "$@"\n' \
   "$repo_path/.venv/bin/python" \
   "$repo_path/create_metadata/create_metadata.py" \
@@ -60,7 +60,7 @@ printf '#!/bin/zsh\nexec %q %q "$@"\n' \
   "$repo_path/.venv/bin/python" \
   "$repo_path/build_crates/build_crates.py" \
   > "$HOME/.local/bin/music-crates"
-chmod +x "$HOME/.local/bin/fm" "$HOME/.local/bin/cm" \
+chmod +x "$HOME/.local/bin/flatten-music" "$HOME/.local/bin/cm" \
   "$HOME/.local/bin/music-dupes" "$HOME/.local/bin/music-bitrate" \
   "$HOME/.local/bin/music-crates"
 ```
@@ -77,7 +77,7 @@ Configure the repository-root `.env` as described in the
 verify all five launchers:
 
 ```bash
-fm --help
+flatten-music --help
 cm --help
 music-dupes --help
 music-bitrate --help
@@ -108,7 +108,7 @@ In Finder, Control-click a music folder and open **Quick Actions**:
 
 | Quick Action | Behavior |
 | --- | --- |
-| **Flatten Music** | Shows an `fm --dry-run` plan, then asks in Terminal before applying it. |
+| **Flatten Music** | Shows a `flatten-music --dry-run` plan, then requires typing FLATTEN in Terminal before applying it. |
 | **Music Metadata — 1 Analyze** | Runs the normal read-only `cm` analysis. |
 | **Music Metadata — 2 Write Accepted** | Confirms, then writes accepted matches only into missing fields. |
 | **Music Metadata — Refresh Analysis** | Refreshes cached Discogs, AcoustID, and Shazam responses. |
@@ -127,11 +127,22 @@ pulling workflow updates.
 For safety, no Finder action runs `cm --force --write`. Replacing existing
 artist and title metadata remains an explicit Terminal-only operation.
 
+The old `fm` launcher is retired. Inspect it with `type -a fm` and
+`cat "$HOME/.local/bin/fm"`; remove that file only if it is this repository's old
+launcher, and remove any corresponding alias from your shell configuration.
+Do not remove an Apple-provided command. Run `rehash` after changing launchers.
+Reinstall the Flatten Music Finder workflow to use `flatten-music`.
+
+Flattening now previews by default, requires an explicit folder, and refuses
+folders without supported audio or with common software-project markers.
+`--apply` shows the plan and requires typing `FLATTEN`. It still moves companion
+files, so select a dedicated music folder and keep a backup.
+
 ## Terminal usage
 
 ```bash
-fm --dry-run "/path/to/music-folder"  # preview flattening
-fm "/path/to/music-folder"            # apply flattening
+flatten-music --dry-run "/path/to/music-folder"  # preview flattening
+flatten-music --apply "/path/to/music-folder"  # preview, then type FLATTEN to apply
 cm "/path/to/music-folder"            # preview metadata
 cm --write "/path/to/music-folder"    # write accepted missing metadata
 cm --force "/path/to/music-folder"    # preview every audio file

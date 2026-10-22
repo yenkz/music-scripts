@@ -22,10 +22,10 @@ class FinderWorkflowTests(unittest.TestCase):
             action["ActionBundlePath"],
             "/System/Library/Automator/Run AppleScript.action",
         )
-        self.assertIn('".local/bin/fm"', script)
+        self.assertIn('".local/bin/flatten-music"', script)
         self.assertIn('set fmCommand to "/bin/zsh "', script)
         self.assertIn('fmCommand & " --dry-run "', script)
-        self.assertIn("Run for real? [y/N]", script)
+        self.assertIn('fmCommand & " --apply "', script)
         self.assertNotIn("/Users/", script)
         self.assertEqual(
             info["NSServices"][0]["NSSendFileTypes"], ["public.folder"]

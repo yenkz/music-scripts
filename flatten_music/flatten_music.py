@@ -55,6 +55,11 @@ WINDOWS_RESERVED_NAMES = {
     *(f"COM{number}" for number in range(1, 10)),
     *(f"LPT{number}" for number in range(1, 10)),
 }
+PROJECT_MARKERS = {
+    ".git", ".hg", ".svn", "node_modules", ".venv", "venv",
+    "package.json", "pyproject.toml", "Cargo.toml", "go.mod",
+    "CMakeLists.txt", "AGENTS.md",
+}
 
 
 @dataclass(frozen=True)
@@ -231,6 +236,25 @@ def scan_tree(root: Path) -> tuple[list[Path], list[Path]]:
     files.sort(key=lambda path: str(path.relative_to(root)).casefold())
     directories.sort(key=lambda path: (len(path.parts), str(path).casefold()), reverse=True)
     return files, directories
+
+
+def validate_music_folder(
+    root: Path, files: Sequence[Path], directories: Sequence[Path]
+) -> None:
+    """Reject obvious non-music targets before metadata reading or mutation."""
+    if root == Path(root.anchor) or root == Path.home().resolve():
+        raise ValueError("refusing to flatten a filesystem root or your home folder")
+    markers = [path for path in (*files, *directories) if path.name in PROJECT_MARKERS]
+    if markers:
+        raise ValueError(
+            f"software-project content found: {markers[0].relative_to(root)}; "
+            "select a dedicated music folder instead"
+        )
+    if not any(
+        path.suffix.lower() in AUDIO_EXTENSIONS and not path.is_symlink()
+        for path in files
+    ):
+        raise ValueError("no supported audio files found; nothing music-related to move")
 
 
 def build_plan(
@@ -454,11 +478,22 @@ def render_report(
             )
         console.print(skipped)
 
+    non_audio_moves = sum(
+        plan.source != plan.flattened
+        and plan.source.suffix.lower() not in AUDIO_EXTENSIONS
+        for plan in plans
+    )
+    if dry_run and non_audio_moves:
+        console.print(Text(
+            f"Warning: this plan also moves {non_audio_moves} non-audio file(s), "
+            "including artwork or documents.", style="bold yellow",
+        ))
+
     if dry_run and change_count:
         console.print(
             Panel(
-                "Review the before/after names above. Run without [bold]--dry-run[/bold] "
-                "to apply them.",
+                "Review the before/after names above. Use [bold]--apply[/bold] "
+                "and type FLATTEN when prompted to apply them.",
                 border_style="yellow",
             )
         )
@@ -525,7 +560,20 @@ def execute_plan(
 
     moved = 0
     for plan in plans:
+        if plan.source != plan.flattened and (
+            plan.flattened.exists() or plan.flattened.is_symlink()
+        ):
+            raise FileExistsError(
+                errno.EEXIST, "destination appeared after planning; nothing changed",
+                str(plan.flattened),
+            )
+    for plan in plans:
         if plan.source != plan.flattened:
+            if plan.flattened.exists() or plan.flattened.is_symlink():
+                raise FileExistsError(
+                    errno.EEXIST, "refusing to overwrite an entry created after planning",
+                    str(plan.flattened),
+                )
             shutil.move(str(plan.source), str(plan.flattened))
             moved += 1
 
@@ -588,6 +636,7 @@ def execute_plan(
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
+        prog="flatten-music",
         description=(
             "Move every file from nested directories into one root directory, "
             "remove empty directories, and rename audio as "
@@ -596,14 +645,17 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "directory",
-        nargs="?",
-        default=".",
-        help="directory to process (default: current directory)",
+        help="dedicated music directory to process (required)",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="preview, then require typing FLATTEN before applying changes",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="show the complete plan without changing anything",
+        help="show the complete plan without changing anything (the default; overrides --apply)",
     )
     parser.add_argument(
         "--skip-rename",
@@ -622,12 +674,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         error_console.print(f"[bold red]Error:[/bold red] not a directory: {root}")
         return 2
 
+    if root == Path(root.anchor) or root == Path.home().resolve():
+        error_console.print(
+            "[bold red]Error:[/bold red] refusing to flatten a filesystem root or your home folder"
+        )
+        return 2
+
     try:
         with console.status("[bold cyan]Scanning files and reading metadata…[/bold cyan]"):
             files, directories = scan_tree(root)
     except OSError as error:
         error_console.print(f"[bold red]Error:[/bold red] cannot scan {root}: {error}")
         return 1
+
+    try:
+        validate_music_folder(root, files, directories)
+    except ValueError as error:
+        error_console.print(Text(f"Warning: {error}. Nothing changed.", style="yellow"))
+        console.print(Panel(summary_table(len(files), 0, 0, 0, 0), title="SUMMARY"))
+        return 2
 
     mutagen_file: Callable[..., Any] | None = None
     if not args.skip_rename and any(
@@ -645,21 +710,46 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 2
 
-    with console.status("[bold cyan]Building the organization plan…[/bold cyan]"):
-        plans = build_plan(root, files, mutagen_file, args.skip_rename)
+    try:
+        with console.status("[bold cyan]Building the organization plan…[/bold cyan]"):
+            plans = build_plan(root, files, mutagen_file, args.skip_rename)
+            source_stats = {path: path.lstat() for path in files}
+    except OSError as error:
+        error_console.print(Text(f"Error: cannot plan changes: {error}", style="red"))
+        return 1
 
-    if args.dry_run:
-        render_report(
-            console,
-            root,
-            plans,
-            directories,
-            dry_run=True,
-            rename_enabled=not args.skip_rename,
-        )
+    render_report(
+        console,
+        root,
+        plans,
+        directories,
+        dry_run=True,
+        rename_enabled=not args.skip_rename,
+    )
+    if args.dry_run or not args.apply:
+        return 0
+
+    if not directories and all(p.source == p.final for p in plans):
+        return 0
+    console.print(Text(
+        f"Target: {root}\nAll listed changes will be applied and empty folders removed. "
+        "Back up this folder first.", style="bold yellow",
+    ))
+    try:
+        answer = console.input("Type FLATTEN to apply this plan (anything else cancels): ")
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    if answer != "FLATTEN":
+        console.print("Cancelled. Nothing changed.")
         return 0
 
     try:
+        current_files, current_directories = scan_tree(root)
+        if (
+            files != current_files or directories != current_directories
+            or any(path.lstat() != source_stats[path] for path in files)
+        ):
+            raise OSError("folder changed after preview; run again to review a fresh plan")
         with console.status("[bold cyan]Organizing the music folder…[/bold cyan]"):
             result = execute_plan(root, plans, directories)
     except OSError as error:

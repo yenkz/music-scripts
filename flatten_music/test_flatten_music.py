@@ -17,7 +17,7 @@ from flatten_music import (
     render_report,
     scan_tree,
 )
-from flatten_music.flatten_music import FilePlan
+from flatten_music.flatten_music import FilePlan, main, parse_args
 
 
 class FakeAudio:
@@ -292,6 +292,126 @@ class FlattenMusicTests(unittest.TestCase):
             self.assertIn("Artist - Track (Dub Mix).mp3", report)
             self.assertGreater(report.index("SUMMARY"), report.index("AFTER"))
             self.assertGreater(report.index("SUMMARY"), report.index("Review the before"))
+
+
+class CliSafetyTests(unittest.TestCase):
+    def run_cli(self, arguments, answer="", effect=None):
+        output = StringIO()
+        errors = StringIO()
+        with patch("sys.stdout", output), patch("sys.stderr", errors), patch.object(
+            Console, "input", side_effect=effect, return_value=answer
+        ) as prompt:
+            code = main(arguments)
+        return code, output.getvalue() + errors.getvalue(), prompt.call_count
+
+    def test_explicit_directory_required(self):
+        with patch("sys.stderr", StringIO()), self.assertRaises(SystemExit) as raised:
+            parse_args([])
+        self.assertEqual(raised.exception.code, 2)
+
+    def test_no_audio_refuses_even_apply_and_skip_rename(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            nested = root / "project"
+            nested.mkdir()
+            source = nested / "important.txt"
+            source.write_text("keep")
+            code, output, prompts = self.run_cli(["--apply", "--skip-rename", temp])
+            self.assertEqual(code, 2)
+            self.assertIn("no supported audio", output)
+            self.assertIn("SUMMARY", output)
+            self.assertEqual(prompts, 0)
+            self.assertEqual(source.read_text(), "keep")
+
+    def test_project_with_audio_is_refused(self):
+        for marker in (".git", "package.json", "pyproject.toml"):
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                (root / marker).mkdir() if marker == ".git" else (root / marker).touch()
+                (root / "sound.wav").write_bytes(b"audio")
+                code, output, prompts = self.run_cli(["--apply", "--skip-rename", temp])
+                self.assertEqual(code, 2)
+                self.assertIn("software-project", output)
+                self.assertEqual(prompts, 0)
+                self.assertTrue((root / marker).exists())
+
+    def test_default_preview_and_dry_run_never_mutate_or_prompt(self):
+        for flags in ([], ["--dry-run"], ["--apply", "--dry-run"]):
+            with self.subTest(flags=flags), tempfile.TemporaryDirectory() as temp:
+                nested = Path(temp) / "album"
+                nested.mkdir()
+                (nested / "track.wav").write_bytes(b"audio")
+                (nested / "cover.jpg").write_bytes(b"art")
+                code, output, prompts = self.run_cli([*flags, "--skip-rename", temp])
+                self.assertEqual(code, 0)
+                self.assertEqual(prompts, 0)
+                self.assertIn("non-audio", output)
+                self.assertTrue((nested / "track.wav").exists())
+                self.assertTrue((nested / "cover.jpg").exists())
+
+    def test_apply_requires_exact_confirmation_and_handles_closed_input(self):
+        for answer, effect in (("", None), ("y", None), ("flatten", None),
+                               ("FLATTEN", None), ("", EOFError), ("", KeyboardInterrupt)):
+            with self.subTest(answer=answer, effect=effect), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                nested = root / "album"
+                nested.mkdir()
+                (nested / "track.wav").write_bytes(b"audio")
+                code, output, prompts = self.run_cli(
+                    ["--apply", "--skip-rename", temp], answer, effect
+                )
+                self.assertEqual(code, 0)
+                self.assertEqual(prompts, 1)
+                self.assertEqual((root / "track.wav").exists(), answer == "FLATTEN")
+                self.assertEqual(nested.exists(), answer != "FLATTEN")
+
+    def test_change_during_confirmation_aborts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            nested = root / "album"
+            nested.mkdir()
+            source = nested / "track.wav"
+            source.write_bytes(b"audio")
+            def change(*args):
+                (nested / "new.txt").write_text("new")
+                return "FLATTEN"
+            code, output, _ = self.run_cli(["--apply", "--skip-rename", temp], effect=change)
+            self.assertEqual(code, 1)
+            self.assertIn("folder changed", output)
+            self.assertTrue(source.exists())
+
+    def test_filesystem_root_and_home_refused_before_scan(self):
+        with patch("flatten_music.flatten_music.scan_tree") as scan:
+            for target in ("/", str(Path.home())):
+                code, _, prompts = self.run_cli(["--apply", target])
+                self.assertEqual(code, 2)
+                self.assertEqual(prompts, 0)
+            scan.assert_not_called()
+
+    def test_audio_symlink_does_not_make_non_music_folder_eligible(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "notes.txt").write_text("notes")
+            (root / "track.wav").symlink_to(root / "notes.txt")
+            code, _, prompts = self.run_cli(["--apply", "--skip-rename", temp])
+            self.assertEqual(code, 2)
+            self.assertEqual(prompts, 0)
+
+    def test_destination_created_after_plan_is_preserved(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            nested = root / "album"
+            nested.mkdir()
+            source = nested / "track.wav"
+            source.write_bytes(b"audio")
+            files, directories = scan_tree(root)
+            plans = build_plan(root, files, None, skip_rename=True)
+            destination = root / "track.wav"
+            destination.write_bytes(b"new")
+            with self.assertRaises(FileExistsError):
+                execute_plan(root, plans, directories)
+            self.assertEqual(source.read_bytes(), b"audio")
+            self.assertEqual(destination.read_bytes(), b"new")
 
 
 if __name__ == "__main__":
